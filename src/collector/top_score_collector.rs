@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::Collector;
 use crate::collector::sort_key::{
-    Comparator, ComparatorEnum, NaturalComparator, ReverseComparator, SortBySimilarityScore,
-    SortByStaticFastValue, SortByString,
+    Comparator, ComparatorEnum, NaturalComparator, ReverseComparator,
+    SortBySimilarityScoreWithThreshold, SortByStaticFastValue, SortByString,
 };
 use crate::collector::sort_key_top_collector::TopBySortKeyCollector;
 use crate::collector::top_collector::ComparableDoc;
@@ -224,7 +224,7 @@ impl TopDocs {
 
     /// Order docs by decreasing BM25 similarity score.
     pub fn order_by_score(self) -> impl Collector<Fruit = Vec<(Score, DocAddress)>> {
-        TopBySortKeyCollector::new(SortBySimilarityScore, self.doc_range())
+        TopBySortKeyCollector::new(SortBySimilarityScoreWithThreshold::new(), self.doc_range())
     }
 
     /// Set top-K to rank documents by a given fast field.

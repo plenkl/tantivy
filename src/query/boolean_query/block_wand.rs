@@ -248,7 +248,7 @@ fn rebalance_partition<'a>(
     });
 }
 
-/// Implements a hybrid MaxScore + Block-Max WAND algorithm for dynamic pruning.
+/// Hybrid MaxScore + Block-Max WAND algorithm for dynamic pruning.
 ///
 /// Based on the Block-Max WAND algorithm described in
 /// "Faster Top-k Document Retrieval Using Block-Max Indexes"
@@ -268,7 +268,6 @@ pub fn block_wand(
         .iter_mut()
         .map(TermScorerWithMaxScore::from)
         .collect();
-
     // Sort by max_score ascending for MaxScore partitioning
     scorers.sort_by(|a, b| {
         a.max_score
