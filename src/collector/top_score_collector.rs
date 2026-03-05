@@ -663,6 +663,36 @@ where
         median_score
     }
 
+    /// Forces threshold computation when the buffer has >= K items,
+    /// without waiting for the 2K buffer to fill.
+    ///
+    /// This is useful after merging results from a completed segment into a global
+    /// accumulator: it ensures the shared threshold is set immediately once K items
+    /// are available, rather than waiting for the buffer to reach 2K capacity.
+    pub fn ensure_threshold(&mut self) {
+        if self.buffer.len() < self.top_n {
+            return;
+        }
+        if self.buffer.len() > self.top_n {
+            // Always truncate when we have more than K items — even if threshold
+            // is already set, truncating to top K gives a tighter bound.
+            let median = self.truncate_top_n();
+            self.threshold = Some(median);
+        } else if self.threshold.is_none() {
+            // Exactly top_n items and no threshold yet: find the minimum score.
+            let min_score = self
+                .buffer
+                .iter()
+                .min_by(|a, b| compare_for_top_k(&self.comparator, a, b).reverse())
+                .unwrap()
+                .sort_key
+                .clone();
+            self.threshold = Some(min_score);
+        }
+        // If buffer.len() == top_n and threshold.is_some(), the threshold
+        // already reflects the min of those K items — nothing to improve.
+    }
+
     /// Returns the top n elements in sorted order.
     pub fn into_sorted_vec(mut self) -> Vec<ComparableDoc<TSortKey, D>> {
         if self.buffer.len() > self.top_n {

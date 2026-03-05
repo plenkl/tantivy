@@ -161,6 +161,7 @@ impl SortKeyComputer for SortBySimilarityScoreWithThreshold {
             for &(score, doc_addr) in &results {
                 global.push(score, doc_addr);
             }
+            global.ensure_threshold();
             if let Some(global_threshold) = global.threshold {
                 if global_threshold > 0.0 {
                     self.shared_threshold
