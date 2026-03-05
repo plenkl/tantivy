@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::collector::sort_key::NaturalComparator;
 use crate::collector::{SegmentSortKeyComputer, SortKeyComputer, TopNComputer};
@@ -69,15 +69,25 @@ impl SortKeyComputer for SortBySimilarityScore {
 /// Uses `Arc<AtomicU32>` to share the best threshold across segments.
 /// For positive f32 values, IEEE 754 bit patterns preserve ordering, so
 /// `AtomicU32::fetch_max` correctly implements max for positive floats.
+///
+/// A global `TopNComputer` accumulates results from all completed segments,
+/// so the shared threshold reflects the global K-th best score rather than
+/// just the per-segment K-th best. This gives subsequent segments a much
+/// tighter pruning bound.
 pub(crate) struct SortBySimilarityScoreWithThreshold {
     shared_threshold: Arc<AtomicU32>,
+    global_top_n: Arc<Mutex<TopNComputer<Score, DocAddress, NaturalComparator>>>,
 }
 
 impl SortBySimilarityScoreWithThreshold {
-    pub fn new() -> Self {
+    pub fn new(k: usize) -> Self {
         // 0u32 = 0.0f32.to_bits() = "no threshold yet"
         Self {
             shared_threshold: Arc::new(AtomicU32::new(0u32)),
+            global_top_n: Arc::new(Mutex::new(TopNComputer::new_with_comparator(
+                k,
+                NaturalComparator,
+            ))),
         }
     }
 }
@@ -139,20 +149,27 @@ impl SortKeyComputer for SortBySimilarityScoreWithThreshold {
             })?;
         }
 
-        // Update shared threshold for subsequent segments
-        if let Some(final_threshold) = top_n.threshold {
-            if final_threshold > 0.0 {
-                // fetch_max is correct for positive f32 bit patterns (IEEE 754 ordering)
-                self.shared_threshold
-                    .fetch_max(final_threshold.to_bits(), Ordering::Relaxed);
-            }
-        }
-
-        Ok(top_n
+        let results: Vec<(Score, DocAddress)> = top_n
             .into_vec()
             .into_iter()
             .map(|cid| (cid.sort_key, DocAddress::new(segment_ord, cid.doc)))
-            .collect())
+            .collect();
+
+        // Merge into global accumulator for better cross-segment threshold
+        {
+            let mut global = self.global_top_n.lock().unwrap();
+            for &(score, doc_addr) in &results {
+                global.push(score, doc_addr);
+            }
+            if let Some(global_threshold) = global.threshold {
+                if global_threshold > 0.0 {
+                    self.shared_threshold
+                        .fetch_max(global_threshold.to_bits(), Ordering::Relaxed);
+                }
+            }
+        }
+
+        Ok(results)
     }
 }
 
