@@ -209,6 +209,7 @@ pub struct QueryParser {
     boost: FxHashMap<Field, Score>,
     fuzzy: FxHashMap<Field, Fuzzy>,
     regexes_allowed: bool,
+    index_record_option: IndexRecordOption,
 }
 
 #[derive(Clone)]
@@ -264,6 +265,7 @@ impl QueryParser {
             boost: Default::default(),
             fuzzy: Default::default(),
             regexes_allowed: false,
+            index_record_option: IndexRecordOption::WithFreqs,
         }
     }
 
@@ -287,6 +289,19 @@ impl QueryParser {
     /// `happy tax payer` will be interpreted by the parser as `happy AND tax AND payer`.
     pub fn set_conjunction_by_default(&mut self) {
         self.conjunction_by_default = true;
+    }
+
+    /// Sets the `IndexRecordOption` used when creating `TermQuery` instances.
+    ///
+    /// By default, the query parser creates `TermQuery` with `IndexRecordOption::WithFreqs`,
+    /// which reads term frequencies for BM25 scoring. Setting this to `IndexRecordOption::Basic`
+    /// tells the query parser to skip reading frequencies, enabling IDF-only scoring and the
+    /// associated pruning optimization for faster long-query performance.
+    ///
+    /// This is useful when the index was built with `WithFreqs` but you want to trade scoring
+    /// precision for query speed.
+    pub fn set_index_record_option(&mut self, option: IndexRecordOption) {
+        self.index_record_option = option;
     }
 
     /// Sets a boost for a specific field.
@@ -335,7 +350,7 @@ impl QueryParser {
     /// is not a valid query.
     pub fn parse_query(&self, query: &str) -> Result<Box<dyn Query>, QueryParserError> {
         let logical_ast = self.parse_query_to_logical_ast(query)?;
-        Ok(convert_to_query(&self.fuzzy, logical_ast))
+        Ok(convert_to_query(&self.fuzzy, self.index_record_option, logical_ast))
     }
 
     /// Parse a query leniently
@@ -348,7 +363,7 @@ impl QueryParser {
     /// In case it encountered such issues, they are reported as a Vec of errors.
     pub fn parse_query_lenient(&self, query: &str) -> (Box<dyn Query>, Vec<QueryParserError>) {
         let (logical_ast, errors) = self.parse_query_to_logical_ast_lenient(query);
-        (convert_to_query(&self.fuzzy, logical_ast), errors)
+        (convert_to_query(&self.fuzzy, self.index_record_option, logical_ast), errors)
     }
 
     /// Build a query from an already parsed user input AST
@@ -364,7 +379,7 @@ impl QueryParser {
         if !err.is_empty() {
             return Err(err.swap_remove(0));
         }
-        Ok(convert_to_query(&self.fuzzy, logical_ast))
+        Ok(convert_to_query(&self.fuzzy, self.index_record_option, logical_ast))
     }
 
     /// Build leniently a query from an already parsed user input AST.
@@ -375,7 +390,7 @@ impl QueryParser {
         user_input_ast: UserInputAst,
     ) -> (Box<dyn Query>, Vec<QueryParserError>) {
         let (logical_ast, errors) = self.compute_logical_ast_lenient(user_input_ast);
-        (convert_to_query(&self.fuzzy, logical_ast), errors)
+        (convert_to_query(&self.fuzzy, self.index_record_option, logical_ast), errors)
     }
 
     /// Parse the user query into an AST.
@@ -913,6 +928,7 @@ impl QueryParser {
 
 fn convert_literal_to_query(
     fuzzy: &FxHashMap<Field, Fuzzy>,
+    index_record_option: IndexRecordOption,
     logical_literal: LogicalLiteral,
 ) -> Box<dyn Query> {
     match logical_literal {
@@ -932,7 +948,7 @@ fn convert_literal_to_query(
                     ))
                 }
             } else {
-                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                Box::new(TermQuery::new(term, index_record_option))
             }
         }
         LogicalLiteral::Phrase {
@@ -1054,12 +1070,18 @@ fn generate_literals_for_json_object(
     Ok(logical_literals)
 }
 
-fn convert_to_query(fuzzy: &FxHashMap<Field, Fuzzy>, logical_ast: LogicalAst) -> Box<dyn Query> {
+fn convert_to_query(
+    fuzzy: &FxHashMap<Field, Fuzzy>,
+    index_record_option: IndexRecordOption,
+    logical_ast: LogicalAst,
+) -> Box<dyn Query> {
     match trim_ast(logical_ast) {
         Some(LogicalAst::Clause(trimmed_clause)) => {
             let occur_subqueries = trimmed_clause
                 .into_iter()
-                .map(|(occur, subquery)| (occur, convert_to_query(fuzzy, subquery)))
+                .map(|(occur, subquery)| {
+                    (occur, convert_to_query(fuzzy, index_record_option, subquery))
+                })
                 .collect::<Vec<_>>();
             assert!(
                 !occur_subqueries.is_empty(),
@@ -1068,10 +1090,10 @@ fn convert_to_query(fuzzy: &FxHashMap<Field, Fuzzy>, logical_ast: LogicalAst) ->
             Box::new(BooleanQuery::new(occur_subqueries))
         }
         Some(LogicalAst::Leaf(trimmed_logical_literal)) => {
-            convert_literal_to_query(fuzzy, *trimmed_logical_literal)
+            convert_literal_to_query(fuzzy, index_record_option, *trimmed_logical_literal)
         }
         Some(LogicalAst::Boost(ast, boost)) => {
-            let query = convert_to_query(fuzzy, *ast);
+            let query = convert_to_query(fuzzy, index_record_option, *ast);
             let boosted_query = BoostQuery::new(query, boost);
             Box::new(boosted_query)
         }

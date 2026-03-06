@@ -69,9 +69,10 @@ where
                 return SpecializedScorer::TermUnion(scorers);
             } else if scorers
                 .iter()
-                .all(|scorer| scorer.freq_reading_option() == FreqReadingOption::NoFreq)
+                .all(|scorer| scorer.freq_reading_option() != FreqReadingOption::ReadFreq)
             {
-                // IDF-only pruning for basic indexing (no frequencies).
+                // IDF-only pruning when frequencies are not being read
+                // (either NoFreq or SkipFreq).
                 return SpecializedScorer::IdfTermUnion(scorers);
             } else {
                 return SpecializedScorer::Other(Box::new(BufferedUnionScorer::build(
