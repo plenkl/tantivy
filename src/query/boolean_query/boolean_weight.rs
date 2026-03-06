@@ -552,3 +552,96 @@ fn is_include_occur(occur: Occur) -> bool {
         Occur::MustNot => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::collector::TopDocs;
+    use crate::query::QueryParser;
+    use crate::schema::*;
+    use crate::{Index, IndexWriter};
+
+    /// End-to-end test: IDF pruning activates when QueryParser uses Basic on a WithFreqs index.
+    ///
+    /// Verifies that `set_index_record_option(Basic)` on a TEXT (WithFreqsAndPositions) index
+    /// produces IDF-only scores (not BM25), confirming the full dispatch path works:
+    /// QueryParser → TermQuery(Basic) → TermWeight(Basic) → SkipFreq → IdfTermUnion → idf_pruning
+    #[test]
+    fn test_idf_scoring_end_to_end() -> crate::Result<()> {
+        let mut schema_builder = Schema::builder();
+        let body = schema_builder.add_text_field("body", TEXT);
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+
+        {
+            let mut writer: IndexWriter = index.writer_for_tests()?;
+            // "cat" appears in 2/5 docs, "dog" in 3/5, "fish" in 1/5
+            writer.add_document(doc!(body => "cat dog"))?;
+            writer.add_document(doc!(body => "dog fish"))?;
+            writer.add_document(doc!(body => "cat dog cat cat"))?; // repeated cat → different BM25, same IDF
+            writer.add_document(doc!(body => "bird"))?;
+            writer.add_document(doc!(body => "bird bird"))?;
+            writer.commit()?;
+        }
+
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+
+        // IDF-only path: Basic skips frequencies
+        let mut qp_idf = QueryParser::for_index(&index, vec![body]);
+        qp_idf.set_index_record_option(IndexRecordOption::Basic);
+        let query_idf = qp_idf.parse_query("cat dog")?;
+        let idf_results = searcher.search(&query_idf, &TopDocs::with_limit(5).order_by_score())?;
+
+        // BM25 path: default uses WithFreqsAndPositions
+        let qp_bm25 = QueryParser::for_index(&index, vec![body]);
+        let query_bm25 = qp_bm25.parse_query("cat dog")?;
+        let bm25_results =
+            searcher.search(&query_bm25, &TopDocs::with_limit(5).order_by_score())?;
+
+        // Doc 0 ("cat dog") and Doc 2 ("cat dog cat cat") both contain cat+dog.
+        // Under BM25, doc 2 scores higher because "cat" appears 3 times.
+        // Under IDF-only scoring, they score identically (same terms present).
+        let idf_score_doc0 = idf_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 0)
+            .map(|(s, _)| *s);
+        let idf_score_doc2 = idf_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 2)
+            .map(|(s, _)| *s);
+        let bm25_score_doc0 = bm25_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 0)
+            .map(|(s, _)| *s);
+        let bm25_score_doc2 = bm25_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 2)
+            .map(|(s, _)| *s);
+
+        // IDF: doc0 == doc2 (same terms, freq doesn't matter)
+        assert!(
+            (idf_score_doc0.unwrap() - idf_score_doc2.unwrap()).abs() < 1e-5,
+            "IDF scores should be equal for docs with same terms: doc0={}, doc2={}",
+            idf_score_doc0.unwrap(),
+            idf_score_doc2.unwrap()
+        );
+
+        // BM25: doc2 > doc0 (higher TF for "cat")
+        assert!(
+            bm25_score_doc2.unwrap() > bm25_score_doc0.unwrap(),
+            "BM25 should score doc2 higher than doc0: doc0={}, doc2={}",
+            bm25_score_doc0.unwrap(),
+            bm25_score_doc2.unwrap()
+        );
+
+        // The two scoring methods must produce different scores
+        assert!(
+            (idf_score_doc0.unwrap() - bm25_score_doc0.unwrap()).abs() > 1e-5,
+            "IDF and BM25 scores should differ: idf={}, bm25={}",
+            idf_score_doc0.unwrap(),
+            bm25_score_doc0.unwrap()
+        );
+
+        Ok(())
+    }
+}
