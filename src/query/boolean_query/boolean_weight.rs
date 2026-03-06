@@ -644,4 +644,83 @@ mod tests {
 
         Ok(())
     }
+
+    /// Same as test_idf_scoring_end_to_end but with a WithFreqs index instead of TEXT
+    /// (WithFreqsAndPositions). Reproduces a bug where WithFreqs + Basic query returned empty
+    /// results.
+    #[test]
+    fn test_idf_scoring_with_freqs_index() -> crate::Result<()> {
+        let mut schema_builder = Schema::builder();
+        let text_opts = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_index_option(IndexRecordOption::WithFreqs)
+                .set_tokenizer("default"),
+        );
+        let body = schema_builder.add_text_field("body", text_opts);
+        let schema = schema_builder.build();
+        let index = Index::create_in_ram(schema);
+
+        {
+            let mut writer: IndexWriter = index.writer_for_tests()?;
+            writer.add_document(doc!(body => "cat dog"))?;
+            writer.add_document(doc!(body => "dog fish"))?;
+            writer.add_document(doc!(body => "cat dog cat cat"))?;
+            writer.add_document(doc!(body => "bird"))?;
+            writer.add_document(doc!(body => "bird bird"))?;
+            writer.commit()?;
+        }
+
+        let reader = index.reader()?;
+        let searcher = reader.searcher();
+
+        // IDF-only path: Basic skips frequencies on a WithFreqs index
+        let mut qp_idf = QueryParser::for_index(&index, vec![body]);
+        qp_idf.set_index_record_option(IndexRecordOption::Basic);
+        let query_idf = qp_idf.parse_query("cat dog")?;
+        let idf_results = searcher.search(&query_idf, &TopDocs::with_limit(5).order_by_score())?;
+
+        // Must return non-empty results
+        assert!(
+            !idf_results.is_empty(),
+            "WithFreqs index with Basic query should return results"
+        );
+
+        // doc0 and doc2 both have cat+dog → same IDF score
+        let idf_score_doc0 = idf_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 0)
+            .map(|(s, _)| *s);
+        let idf_score_doc2 = idf_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 2)
+            .map(|(s, _)| *s);
+
+        assert!(
+            (idf_score_doc0.unwrap() - idf_score_doc2.unwrap()).abs() < 1e-5,
+            "IDF scores should be equal for docs with same terms: doc0={}, doc2={}",
+            idf_score_doc0.unwrap(),
+            idf_score_doc2.unwrap()
+        );
+
+        // BM25 path: default uses WithFreqs (full freq reading)
+        let qp_bm25 = QueryParser::for_index(&index, vec![body]);
+        let query_bm25 = qp_bm25.parse_query("cat dog")?;
+        let bm25_results =
+            searcher.search(&query_bm25, &TopDocs::with_limit(5).order_by_score())?;
+
+        let bm25_score_doc0 = bm25_results
+            .iter()
+            .find(|(_, addr)| addr.doc_id == 0)
+            .map(|(s, _)| *s);
+
+        // IDF and BM25 scores should differ
+        assert!(
+            (idf_score_doc0.unwrap() - bm25_score_doc0.unwrap()).abs() > 1e-5,
+            "IDF and BM25 scores should differ: idf={}, bm25={}",
+            idf_score_doc0.unwrap(),
+            bm25_score_doc0.unwrap()
+        );
+
+        Ok(())
+    }
 }

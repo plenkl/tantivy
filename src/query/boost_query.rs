@@ -112,7 +112,7 @@ impl Weight for BoostWeight {
         let boost = self.boost;
         self.weight
             .for_each_pruning(threshold / boost, reader, &mut |doc, score| {
-                callback(doc, score * boost)
+                callback(doc, score * boost) / boost
             })
     }
 }
