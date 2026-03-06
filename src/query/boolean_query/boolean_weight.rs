@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use log::info;
 
@@ -533,6 +534,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         callback: &mut dyn FnMut(DocId, Score) -> Score,
         top_k: usize,
     ) -> crate::Result<()> {
+        let start = Instant::now();
         // Optimization 2: Early segment termination.
         // Sum sub-weight max_scores; if <= threshold, no doc in this segment can beat it.
         let total_max_score: Score = self
@@ -542,6 +544,10 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
             .map(|(_, w)| w.max_score())
             .sum();
         if total_max_score <= threshold {
+            info!(
+                "segment_skipped: elapsed={:.3}ms max_score={total_max_score:.4} threshold={threshold:.4}",
+                start.elapsed().as_secs_f64() * 1000.0,
+            );
             return Ok(());
         }
 
@@ -549,11 +555,13 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 super::block_wand(term_scorers, threshold, callback);
+                info!("block_wand: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
             }
             SpecializedScorer::IdfTermUnion(term_scorers) => {
                 let stats = super::idf_pruning(term_scorers, threshold, top_k, callback);
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
                 info!(
-                    "idf_pruning: seeks={} advances={} evaluated={} emitted={} \
+                    "idf_pruning: elapsed={elapsed_ms:.3}ms seeks={} advances={} evaluated={} emitted={} \
                      phase1={} phase2={} terms={} abs_essential={} \
                      threshold={:.4}→{:.4}",
                     stats.num_seeks,
@@ -570,6 +578,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
             }
             SpecializedScorer::Other(mut scorer) => {
                 for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
+                info!("for_each_pruning: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
             }
         }
         Ok(())
