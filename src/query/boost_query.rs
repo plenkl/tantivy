@@ -103,17 +103,27 @@ impl Weight for BoostWeight {
         self.weight.for_each_no_score(reader, callback)
     }
 
+    fn max_score(&self) -> Score {
+        let inner = self.weight.max_score();
+        if inner == Score::MAX {
+            Score::MAX
+        } else {
+            inner * self.boost
+        }
+    }
+
     fn for_each_pruning(
         &self,
         threshold: Score,
         reader: &SegmentReader,
         callback: &mut dyn FnMut(DocId, Score) -> Score,
+        top_k: usize,
     ) -> crate::Result<()> {
         let boost = self.boost;
         self.weight
             .for_each_pruning(threshold / boost, reader, &mut |doc, score| {
                 callback(doc, score * boost) / boost
-            })
+            }, top_k)
     }
 }
 

@@ -110,21 +110,23 @@ pub trait Weight: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Returns the maximum possible score for any document.
+    /// Used for early segment termination in pruning.
+    fn max_score(&self) -> Score {
+        Score::MAX
+    }
+
     /// Calls `callback` with all of the `(doc, score)` for which score
-    /// is exceeding a given threshold.
+    /// is exceeding a given threshold, with pruning optimization.
     ///
-    /// This method is useful for the [`TopDocs`](crate::collector::TopDocs) collector.
-    /// For all docsets, the blanket implementation has the benefit
-    /// of prefiltering (doc, score) pairs, avoiding the
-    /// virtual dispatch cost.
-    ///
-    /// More importantly, it makes it possible for scorers to implement
-    /// important optimization (e.g. BlockWAND for union).
+    /// `top_k` is the number of top documents being collected, used by
+    /// IDF pruning to bootstrap an analytical threshold.
     fn for_each_pruning(
         &self,
         threshold: Score,
         reader: &SegmentReader,
         callback: &mut dyn FnMut(DocId, Score) -> Score,
+        _top_k: usize,
     ) -> crate::Result<()> {
         let mut scorer = self.scorer(reader, 1.0)?;
         for_each_pruning_scorer(scorer.as_mut(), threshold, callback);

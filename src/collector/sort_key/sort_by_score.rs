@@ -48,12 +48,12 @@ impl SortKeyComputer for SortBySimilarityScore {
                 top_n.push(score, doc);
                 threshold = top_n.threshold.unwrap_or(Score::MIN);
                 threshold
-            })?;
+            }, k)?;
         } else {
             weight.for_each_pruning(Score::MIN, reader, &mut |doc, score| {
                 top_n.push(score, doc);
                 top_n.threshold.unwrap_or(Score::MIN)
-            })?;
+            }, k)?;
         }
 
         Ok(top_n
@@ -141,12 +141,12 @@ impl SortKeyComputer for SortBySimilarityScoreWithThreshold {
                 top_n.push(score, doc);
                 threshold = top_n.threshold.unwrap_or(initial_threshold);
                 threshold
-            })?;
+            }, k)?;
         } else {
             weight.for_each_pruning(initial_threshold, reader, &mut |doc, score| {
                 top_n.push(score, doc);
                 top_n.threshold.unwrap_or(initial_threshold)
-            })?;
+            }, k)?;
         }
 
         let results: Vec<(Score, DocAddress)> = top_n

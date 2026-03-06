@@ -531,14 +531,27 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         threshold: Score,
         reader: &SegmentReader,
         callback: &mut dyn FnMut(DocId, Score) -> Score,
+        top_k: usize,
     ) -> crate::Result<()> {
+        // Optimization 2: Early segment termination.
+        // Sum sub-weight max_scores; if <= threshold, no doc in this segment can beat it.
+        let total_max_score: Score = self
+            .weights
+            .iter()
+            .filter(|(occur, _)| is_include_occur(*occur))
+            .map(|(_, w)| w.max_score())
+            .sum();
+        if total_max_score <= threshold {
+            return Ok(());
+        }
+
         let scorer = self.complex_scorer(reader, 1.0, &self.score_combiner_fn)?;
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 super::block_wand(term_scorers, threshold, callback);
             }
             SpecializedScorer::IdfTermUnion(term_scorers) => {
-                let stats = super::idf_pruning(term_scorers, threshold, callback);
+                let stats = super::idf_pruning(term_scorers, threshold, top_k, callback);
                 info!(
                     "idf_pruning: seeks={} advances={} evaluated={} emitted={} \
                      phase1={} phase2={} terms={} abs_essential={} \

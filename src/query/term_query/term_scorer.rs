@@ -99,6 +99,11 @@ impl TermScorer {
         self.similarity_weight.idf()
     }
 
+    /// Returns the global document frequency for this term.
+    pub fn global_doc_freq(&self) -> u64 {
+        self.similarity_weight.term_doc_freq()
+    }
+
     pub fn last_doc_in_block(&self) -> DocId {
         self.postings.block_cursor.skip_reader().last_doc_in_block()
     }

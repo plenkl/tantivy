@@ -76,6 +76,7 @@ pub struct Bm25Weight {
     weight: Score,
     cache: Arc<[Score; 256]>,
     average_fieldnorm: Score,
+    term_doc_freq: u64,
 }
 
 impl Bm25Weight {
@@ -90,12 +91,18 @@ impl Bm25Weight {
             weight: self.weight * boost,
             cache: self.cache.clone(),
             average_fieldnorm: self.average_fieldnorm,
+            term_doc_freq: self.term_doc_freq,
         }
     }
 
     /// Returns the raw IDF value for this weight.
     pub fn idf(&self) -> Score {
         self.idf
+    }
+
+    /// Returns the global document frequency used to compute this weight.
+    pub fn term_doc_freq(&self) -> u64 {
+        self.term_doc_freq
     }
 
     /// Construct a [Bm25Weight] for a phrase of terms.
@@ -131,7 +138,7 @@ impl Bm25Weight {
                 idf_sum += idf(term_doc_freq, total_num_docs);
             }
             let idf_explain = Explanation::new("idf", idf_sum);
-            Ok(Bm25Weight::new(idf_explain, average_fieldnorm))
+            Ok(Bm25Weight::new(idf_explain, average_fieldnorm, 0))
         }
     }
 
@@ -149,7 +156,7 @@ impl Bm25Weight {
             term_doc_freq as Score,
         );
         idf_explain.add_const("N, total number of docs", total_num_docs as Score);
-        Bm25Weight::new(idf_explain, avg_fieldnorm)
+        Bm25Weight::new(idf_explain, avg_fieldnorm, term_doc_freq)
     }
     /// Construct a [Bm25Weight] for a single term.
     /// This method does not carry the [Explanation] for the idf.
@@ -159,10 +166,14 @@ impl Bm25Weight {
         avg_fieldnorm: Score,
     ) -> Bm25Weight {
         let idf = idf(term_doc_freq, total_num_docs);
-        Bm25Weight::new_without_explain(idf, avg_fieldnorm)
+        Bm25Weight::new_without_explain(idf, avg_fieldnorm, term_doc_freq)
     }
 
-    pub(crate) fn new(idf_explain: Explanation, average_fieldnorm: Score) -> Bm25Weight {
+    pub(crate) fn new(
+        idf_explain: Explanation,
+        average_fieldnorm: Score,
+        term_doc_freq: u64,
+    ) -> Bm25Weight {
         let idf = idf_explain.value();
         let weight = idf * (1.0 + K1);
         Bm25Weight {
@@ -171,9 +182,14 @@ impl Bm25Weight {
             weight,
             cache: compute_tf_cache(average_fieldnorm),
             average_fieldnorm,
+            term_doc_freq,
         }
     }
-    pub(crate) fn new_without_explain(idf: f32, average_fieldnorm: Score) -> Bm25Weight {
+    pub(crate) fn new_without_explain(
+        idf: f32,
+        average_fieldnorm: Score,
+        term_doc_freq: u64,
+    ) -> Bm25Weight {
         let weight = idf * (1.0 + K1);
         Bm25Weight {
             idf_explain: None,
@@ -181,6 +197,7 @@ impl Bm25Weight {
             weight,
             cache: compute_tf_cache(average_fieldnorm),
             average_fieldnorm,
+            term_doc_freq,
         }
     }
 

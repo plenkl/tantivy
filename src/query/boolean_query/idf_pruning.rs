@@ -32,6 +32,7 @@ pub struct IdfPruningStats {
 pub fn idf_pruning(
     mut scorers: Vec<TermScorer>,
     mut threshold: Score,
+    top_k: usize,
     callback: &mut dyn FnMut(u32, Score) -> Score,
 ) -> IdfPruningStats {
     let mut stats = IdfPruningStats {
@@ -52,8 +53,6 @@ pub fn idf_pruning(
         return stats;
     }
 
-    stats.initial_threshold = threshold;
-
     // Partition into essential / non-essential based on MaxScore prefix-sum
     let mut all_indices: Vec<usize> = (0..scorers.len()).collect();
     all_indices.sort_by(|&a, &b| {
@@ -62,9 +61,47 @@ pub fn idf_pruning(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Phase 0: Analytical threshold bootstrap from global doc frequencies.
+    //
+    // If a single term has doc_freq >= K, then at least K documents score >= that
+    // term's IDF. We walk from highest IDF (rarest) to find the best such term.
+    //
+    // We only consider individual terms (not accumulated counts) because documents
+    // can appear in multiple terms' posting lists, making accumulation unsound.
+    if top_k > 0 && threshold <= Score::MIN + 1.0 {
+        for &idx in all_indices.iter().rev() {
+            if scorers[idx].global_doc_freq() >= top_k as u64 {
+                // Subtract a margin to avoid floating-point issues where
+                // `total_idf - threshold` rounds below a term's IDF, falsely
+                // triggering absolutely-essential partition.
+                let margin = total_idf * 1e-6;
+                let bootstrap = idfs[idx] - margin;
+                if bootstrap > threshold {
+                    threshold = bootstrap;
+                }
+                break;
+            }
+        }
+    }
+
+    stats.initial_threshold = threshold;
+
+    // Re-check after Phase 0 may have raised threshold
+    if total_idf <= threshold {
+        stats.final_threshold = threshold;
+        return stats;
+    }
+
     let split = prefix_sum_split(&all_indices, &idfs, threshold);
     let mut non_essential: Vec<usize> = all_indices[..split].to_vec();
     let mut essential: Vec<usize> = all_indices[split..].to_vec();
+
+    // Defensive: if f32 rounding made essential empty, put everything essential
+    if essential.is_empty() {
+        essential = all_indices.clone();
+        non_essential.clear();
+    }
+
     let mut non_essential_idf_sum: Score = non_essential.iter().map(|&i| idfs[i]).sum();
 
     // Check if we can go straight to Phase 2
@@ -148,8 +185,6 @@ fn phase1(
     stats: &mut IdfPruningStats,
 ) {
     loop {
-        // Remove terminated essential scorers
-        essential.retain(|&i| scorers[i].doc() != TERMINATED);
         if essential.is_empty() {
             break;
         }
@@ -165,11 +200,17 @@ fn phase1(
             break;
         }
 
-        // Sum IDF for essential terms on this doc
+        // Score AND advance in one pass
         let mut score = 0.0f32;
+        let mut any_terminated = false;
         for &idx in essential.iter() {
             if scorers[idx].doc() == min_doc {
                 score += idfs[idx];
+                scorers[idx].advance();
+                stats.num_advances += 1;
+                if scorers[idx].doc() == TERMINATED {
+                    any_terminated = true;
+                }
             }
         }
 
@@ -204,11 +245,11 @@ fn phase1(
             }
         }
 
-        // Advance all essential scorers that were on min_doc
-        for &idx in essential.iter() {
-            if scorers[idx].doc() == min_doc {
-                scorers[idx].advance();
-                stats.num_advances += 1;
+        // Defer retain to only when needed
+        if any_terminated {
+            essential.retain(|&i| scorers[i].doc() != TERMINATED);
+            if essential.is_empty() {
+                break;
             }
         }
 
@@ -480,16 +521,17 @@ mod tests {
 
     /// Create a TermScorer with IDF-only scoring from a list of doc IDs.
     fn create_idf_scorer(docs: &[DocId], idf_value: Score) -> TermScorer {
+        let doc_freq = docs.len() as u64;
         if docs.is_empty() {
             let segment_postings = SegmentPostings::empty();
             let fieldnorm_reader = FieldNormReader::constant(1, 1);
-            let bm25_weight = Bm25Weight::new_without_explain(idf_value, 1.0);
+            let bm25_weight = Bm25Weight::new_without_explain(idf_value, 1.0, doc_freq);
             return TermScorer::new(segment_postings, fieldnorm_reader, bm25_weight);
         }
         let max_doc = docs.iter().max().unwrap() + 1;
         let fieldnorms: Vec<u32> = vec![1; max_doc as usize];
         let doc_and_tfs: Vec<(DocId, u32)> = docs.iter().map(|&d| (d, 1)).collect();
-        let bm25_weight = Bm25Weight::new_without_explain(idf_value, 1.0);
+        let bm25_weight = Bm25Weight::new_without_explain(idf_value, 1.0, doc_freq);
         let segment_postings =
             SegmentPostings::create_from_docs_and_tfs(&doc_and_tfs, Some(&fieldnorms));
         let fieldnorm_reader = FieldNormReader::for_test(&fieldnorms);
@@ -543,7 +585,7 @@ mod tests {
             limit
         };
 
-        let _stats = idf_pruning(scorers, Score::MIN, callback);
+        let _stats = idf_pruning(scorers, Score::MIN, k, callback);
 
         // From collected, extract the final top-K
         let final_limit = if heap.len() == k {
@@ -612,7 +654,7 @@ mod tests {
         let scorer2 = create_idf_scorer(&[0, 1, 2], 0.5);
 
         let mut results: Vec<(DocId, Score)> = Vec::new();
-        let _stats = idf_pruning(vec![scorer1, scorer2], 100.0, &mut |doc, score| {
+        let _stats = idf_pruning(vec![scorer1, scorer2], 100.0, 0, &mut |doc, score| {
             results.push((doc, score));
             100.0
         });
@@ -621,7 +663,7 @@ mod tests {
 
     #[test]
     fn test_idf_pruning_empty() {
-        let stats = idf_pruning(vec![], 0.0, &mut |_doc, _score| 0.0);
+        let stats = idf_pruning(vec![], 0.0, 0, &mut |_doc, _score| 0.0);
         assert_eq!(stats.candidates_evaluated, 0);
     }
 
