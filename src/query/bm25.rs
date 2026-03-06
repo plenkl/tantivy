@@ -72,6 +72,7 @@ fn compute_tf_cache(average_fieldnorm: Score) -> Arc<[Score; 256]> {
 #[derive(Clone)]
 pub struct Bm25Weight {
     idf_explain: Option<Explanation>,
+    idf: Score,
     weight: Score,
     cache: Arc<[Score; 256]>,
     average_fieldnorm: Score,
@@ -85,10 +86,16 @@ impl Bm25Weight {
         }
         Bm25Weight {
             idf_explain: self.idf_explain.clone(),
+            idf: self.idf,
             weight: self.weight * boost,
             cache: self.cache.clone(),
             average_fieldnorm: self.average_fieldnorm,
         }
+    }
+
+    /// Returns the raw IDF value for this weight.
+    pub fn idf(&self) -> Score {
+        self.idf
     }
 
     /// Construct a [Bm25Weight] for a phrase of terms.
@@ -156,9 +163,11 @@ impl Bm25Weight {
     }
 
     pub(crate) fn new(idf_explain: Explanation, average_fieldnorm: Score) -> Bm25Weight {
-        let weight = idf_explain.value() * (1.0 + K1);
+        let idf = idf_explain.value();
+        let weight = idf * (1.0 + K1);
         Bm25Weight {
             idf_explain: Some(idf_explain),
+            idf,
             weight,
             cache: compute_tf_cache(average_fieldnorm),
             average_fieldnorm,
@@ -168,6 +177,7 @@ impl Bm25Weight {
         let weight = idf * (1.0 + K1);
         Bm25Weight {
             idf_explain: None,
+            idf,
             weight,
             cache: compute_tf_cache(average_fieldnorm),
             average_fieldnorm,

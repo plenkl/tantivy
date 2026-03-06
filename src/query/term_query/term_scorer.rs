@@ -92,6 +92,13 @@ impl TermScorer {
         self.similarity_weight.max_score()
     }
 
+    /// Returns the IDF score for this term.
+    /// When using IDF-only scoring (no frequencies), this is the constant score
+    /// contributed by this term for every document that contains it.
+    pub fn idf_score(&self) -> Score {
+        self.similarity_weight.idf()
+    }
+
     pub fn last_doc_in_block(&self) -> DocId {
         self.postings.block_cursor.skip_reader().last_doc_in_block()
     }

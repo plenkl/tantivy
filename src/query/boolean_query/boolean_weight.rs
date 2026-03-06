@@ -16,6 +16,7 @@ use crate::{DocId, Score};
 
 enum SpecializedScorer {
     TermUnion(Vec<TermScorer>),
+    IdfTermUnion(Vec<TermScorer>),
     Other(Box<dyn Scorer>),
 }
 
@@ -66,6 +67,12 @@ where
             {
                 // Block wand is only available if we read frequencies.
                 return SpecializedScorer::TermUnion(scorers);
+            } else if scorers
+                .iter()
+                .all(|scorer| scorer.freq_reading_option() == FreqReadingOption::NoFreq)
+            {
+                // IDF-only pruning for basic indexing (no frequencies).
+                return SpecializedScorer::IdfTermUnion(scorers);
             } else {
                 return SpecializedScorer::Other(Box::new(BufferedUnionScorer::build(
                     scorers,
@@ -88,7 +95,8 @@ fn into_box_scorer<TScoreCombiner: ScoreCombiner>(
     num_docs: u32,
 ) -> Box<dyn Scorer> {
     match scorer {
-        SpecializedScorer::TermUnion(term_scorers) => {
+        SpecializedScorer::TermUnion(term_scorers)
+        | SpecializedScorer::IdfTermUnion(term_scorers) => {
             let union_scorer =
                 BufferedUnionScorer::build(term_scorers, score_combiner_fn, num_docs);
             Box::new(union_scorer)
@@ -464,7 +472,8 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
     ) -> crate::Result<()> {
         let scorer = self.complex_scorer(reader, 1.0, &self.score_combiner_fn)?;
         match scorer {
-            SpecializedScorer::TermUnion(term_scorers) => {
+            SpecializedScorer::TermUnion(term_scorers)
+            | SpecializedScorer::IdfTermUnion(term_scorers) => {
                 let mut union_scorer = BufferedUnionScorer::build(
                     term_scorers,
                     &self.score_combiner_fn,
@@ -488,7 +497,8 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
 
         match scorer {
-            SpecializedScorer::TermUnion(term_scorers) => {
+            SpecializedScorer::TermUnion(term_scorers)
+            | SpecializedScorer::IdfTermUnion(term_scorers) => {
                 let mut union_scorer = BufferedUnionScorer::build(
                     term_scorers,
                     &self.score_combiner_fn,
@@ -523,6 +533,9 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 super::block_wand(term_scorers, threshold, callback);
+            }
+            SpecializedScorer::IdfTermUnion(term_scorers) => {
+                super::idf_pruning(term_scorers, threshold, callback);
             }
             SpecializedScorer::Other(mut scorer) => {
                 for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
