@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use log::info;
+
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::index::SegmentReader;
 use crate::postings::FreqReadingOption;
@@ -536,7 +538,22 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
                 super::block_wand(term_scorers, threshold, callback);
             }
             SpecializedScorer::IdfTermUnion(term_scorers) => {
-                super::idf_pruning(term_scorers, threshold, callback);
+                let stats = super::idf_pruning(term_scorers, threshold, callback);
+                info!(
+                    "idf_pruning: seeks={} advances={} evaluated={} emitted={} \
+                     phase1={} phase2={} terms={} abs_essential={} \
+                     threshold={:.4}→{:.4}",
+                    stats.num_seeks,
+                    stats.num_advances,
+                    stats.candidates_evaluated,
+                    stats.candidates_emitted,
+                    stats.phase1_candidates,
+                    stats.phase2_candidates,
+                    stats.num_terms,
+                    stats.num_absolutely_essential_at_end,
+                    stats.initial_threshold,
+                    stats.final_threshold,
+                );
             }
             SpecializedScorer::Other(mut scorer) => {
                 for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
