@@ -103,10 +103,37 @@ pub fn open_column_u128_as_compact_u64(
     })
 }
 
+fn has_valid_dictionary_footer(data: &[u8]) -> bool {
+    if data.len() < 20 {
+        return false;
+    }
+    let footer = &data[data.len() - 20..];
+    let index_offset = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+    let version = u32::from_le_bytes(footer[16..20].try_into().unwrap());
+    version == 3 && (index_offset as usize) <= data.len() - 20
+}
+
+fn detect_dictionary_len(body: &[u8], stored_len: usize) -> io::Result<usize> {
+    if stored_len <= body.len() && has_valid_dictionary_footer(&body[..stored_len]) {
+        return Ok(stored_len);
+    }
+    let overflowed = stored_len + (1 << 32);
+    if overflowed <= body.len() && has_valid_dictionary_footer(&body[..overflowed]) {
+        return Ok(overflowed);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid dictionary length",
+    ))
+}
+
 pub fn open_column_bytes(data: OwnedBytes, format_version: Version) -> io::Result<BytesColumn> {
     let (body, dictionary_len_bytes) = data.rsplit(4);
-    let dictionary_len = u32::from_le_bytes(dictionary_len_bytes.as_slice().try_into().unwrap());
-    let (dictionary_bytes, column_bytes) = body.split(dictionary_len as usize);
+    let stored_len = u32::from_le_bytes(
+        dictionary_len_bytes.as_slice().try_into().unwrap(),
+    ) as usize;
+    let dictionary_len = detect_dictionary_len(body.as_slice(), stored_len)?;
+    let (dictionary_bytes, column_bytes) = body.split(dictionary_len);
     let dictionary = Arc::new(Dictionary::from_bytes(dictionary_bytes)?);
     let term_ord_column = crate::column::open_column_u64::<u64>(column_bytes, format_version)?;
     Ok(BytesColumn {

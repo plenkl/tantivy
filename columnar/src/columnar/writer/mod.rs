@@ -410,7 +410,10 @@ fn serialize_bytes_or_str_column(
     let mut counting_writer = CountingWriter::wrap(wrt);
     let term_id_mapping: TermIdMapping =
         dictionary_builder.serialize(arena, &mut counting_writer)?;
-    let dictionary_num_bytes: u32 = counting_writer.written_bytes() as u32;
+    let dictionary_num_bytes: u32 = counting_writer
+        .written_bytes()
+        .try_into()
+        .expect("dictionary exceeds u32::MAX bytes");
     let mut wrt = counting_writer.finish();
     let operation_iterator = operation_it.map(|symbol: ColumnOperation<UnorderedId>| {
         // We map unordered ids to ordered ids.
