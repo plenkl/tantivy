@@ -165,7 +165,7 @@ fn partition_absolutely_essential(
     let mut abs = Vec::new();
     let mut rest = Vec::new();
     for &idx in terms {
-        if idfs[idx] > cutoff {
+        if idfs[idx] >= cutoff {
             abs.push(idx);
         } else {
             rest.push(idx);
@@ -501,7 +501,7 @@ fn promote_to_absolutely_essential(
     let cutoff = total_idf - threshold;
     let mut i = 0;
     while i < remaining.len() {
-        if idfs[remaining[i]] > cutoff {
+        if idfs[remaining[i]] >= cutoff {
             let idx = remaining.swap_remove(i);
             abs_essential.push(idx);
         } else {
