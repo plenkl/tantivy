@@ -563,7 +563,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
                 info!(
                     "idf_pruning: elapsed={elapsed_ms:.3}ms seeks={} advances={} evaluated={} emitted={} \
                      phase1={} phase2={} terms={} abs_essential={} \
-                     threshold={:.4}→{:.4} min_k={} essential={}",
+                     threshold={:.4}→{:.4}",
                     stats.num_seeks,
                     stats.num_advances,
                     stats.candidates_evaluated,
@@ -574,8 +574,6 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
                     stats.num_absolutely_essential_at_end,
                     stats.initial_threshold,
                     stats.final_threshold,
-                    stats.initial_min_essential_matches,
-                    stats.initial_num_essential,
                 );
             }
             SpecializedScorer::Other(mut scorer) => {

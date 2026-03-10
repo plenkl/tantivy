@@ -12,8 +12,6 @@ pub struct IdfPruningStats {
     pub phase2_candidates: u64,
     pub num_terms: u32,
     pub num_absolutely_essential_at_end: u32,
-    pub initial_min_essential_matches: u32,
-    pub initial_num_essential: u32,
     pub initial_threshold: Score,
     pub final_threshold: Score,
 }
@@ -174,29 +172,6 @@ fn partition_absolutely_essential(
     (abs, rest)
 }
 
-/// Compute the minimum number of essential term matches needed to exceed threshold.
-///
-/// A document matching m essential terms has max score = sum of m largest essential IDFs
-/// + non_essential_idf_sum. Returns the smallest m where this exceeds threshold.
-fn compute_min_essential_matches(
-    essential: &[usize],
-    idfs: &[Score],
-    non_essential_idf_sum: Score,
-    threshold: Score,
-) -> usize {
-    let mut sorted_idfs: Vec<Score> = essential.iter().map(|&i| idfs[i]).collect();
-    sorted_idfs.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut cumulative = non_essential_idf_sum;
-    for (i, &idf) in sorted_idfs.iter().enumerate() {
-        cumulative += idf;
-        if cumulative > threshold {
-            return i + 1;
-        }
-    }
-    essential.len()
-}
-
 /// Phase 1: MaxScore iteration with union of essential terms.
 fn phase1(
     scorers: &mut [TermScorer],
@@ -209,50 +184,29 @@ fn phase1(
     callback: &mut dyn FnMut(u32, Score) -> Score,
     stats: &mut IdfPruningStats,
 ) {
-    let mut min_essential_matches = compute_min_essential_matches(
-        essential, idfs, *non_essential_idf_sum, *threshold,
-    );
-    stats.initial_min_essential_matches = min_essential_matches as u32;
-    stats.initial_num_essential = essential.len() as u32;
-
     loop {
         if essential.is_empty() {
             break;
         }
 
-        // Find pivot: kth smallest doc among essential scorers
-        let k = min_essential_matches.min(essential.len());
-        essential.select_nth_unstable_by_key(k - 1, |&i| scorers[i].doc());
-        let pivot = scorers[essential[k - 1]].doc();
+        // Find the minimum doc among essential scorers
+        let min_doc = essential.iter().map(|&i| scorers[i].doc()).min().unwrap();
 
-        if pivot == TERMINATED {
+        if min_doc == TERMINATED {
             break;
         }
 
-        // Seek lagging scorers (doc < pivot) forward to pivot.
-        // After select_nth, elements [0..k-1] have doc <= pivot, [k..] have doc >= pivot.
-        for &idx in essential.iter().take(k - 1) {
-            if scorers[idx].doc() < pivot {
-                scorers[idx].seek(pivot);
-                stats.num_seeks += 1;
-            }
-        }
-
-        // Score AND advance scorers at pivot
+        // Score AND advance scorers at min_doc
         let mut score = 0.0f32;
         let mut any_terminated = false;
         for &idx in essential.iter() {
-            if scorers[idx].doc() == pivot {
+            if scorers[idx].doc() == min_doc {
                 score += idfs[idx];
                 scorers[idx].advance();
                 stats.num_advances += 1;
                 if scorers[idx].doc() == TERMINATED {
                     any_terminated = true;
                 }
-            }
-            // Also catch terminated scorers from seeking
-            if scorers[idx].doc() == TERMINATED {
-                any_terminated = true;
             }
         }
 
@@ -275,26 +229,23 @@ fn phase1(
                 break;
             }
             remaining_non_essential -= idfs[idx];
-            if scorers[idx].doc() > pivot {
+            if scorers[idx].doc() > min_doc {
                 continue;
             }
-            let doc = scorers[idx].seek(pivot);
+            let doc = scorers[idx].seek(min_doc);
             stats.num_seeks += 1;
-            if doc == pivot {
+            if doc == min_doc {
                 score += idfs[idx];
             }
         }
 
         if score > *threshold {
-            let new_threshold = callback(pivot, score);
+            let new_threshold = callback(min_doc, score);
             stats.candidates_emitted += 1;
             if new_threshold > *threshold {
                 *threshold = new_threshold;
 
                 rebalance(essential, non_essential, non_essential_idf_sum, idfs, *threshold);
-                min_essential_matches = compute_min_essential_matches(
-                    essential, idfs, *non_essential_idf_sum, *threshold,
-                );
 
                 let (abs, rest) =
                     partition_absolutely_essential(essential, idfs, total_idf, *threshold);
