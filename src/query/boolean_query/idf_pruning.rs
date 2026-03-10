@@ -265,6 +265,45 @@ fn phase1(
     }
 }
 
+/// Align all absolutely essential scorers to the same document using
+/// restart-from-shortest intersection. `abs_essential` must be sorted by
+/// posting list size (shortest first).
+fn align_absolutely_essential(
+    scorers: &mut [TermScorer],
+    abs_essential: &[usize],
+    stats: &mut IdfPruningStats,
+) -> Option<DocId> {
+    let mut target = scorers[abs_essential[0]].doc();
+    if target == TERMINATED {
+        return None;
+    }
+
+    'outer: loop {
+        for &idx in abs_essential {
+            let doc = scorers[idx].doc();
+            if doc == target {
+                continue;
+            }
+            let doc = if doc < target {
+                let d = scorers[idx].seek(target);
+                stats.num_seeks += 1;
+                d
+            } else {
+                doc
+            };
+            if doc == TERMINATED {
+                return None;
+            }
+            if doc > target {
+                target = doc;
+                continue 'outer;
+            }
+            // doc == target, continue to next term
+        }
+        return Some(target);
+    }
+}
+
 /// Phase 2: Intersection of absolutely essential terms + lazy scoring.
 fn phase2(
     scorers: &mut [TermScorer],
@@ -283,24 +322,20 @@ fn phase2(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Find the cheapest (smallest posting list) absolutely essential scorer to drive iteration
-    let driver_pos = abs_essential
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, &i)| scorers[i].size_hint())
-        .map(|(pos, _)| pos)
-        .unwrap();
-    abs_essential.swap(0, driver_pos);
+    // Sort abs_essential by posting list size (shortest first) for restart-from-shortest
+    abs_essential.sort_by_key(|&i| scorers[i].size_hint());
+
+    // Pre-compute abs_essential score sum (updated after promotions)
+    let mut abs_score: Score = abs_essential.iter().map(|&i| idfs[i]).sum();
 
     loop {
-        // Align all absolutely essential scorers to the same document
         let candidate = match align_absolutely_essential(scorers, &abs_essential, stats) {
             Some(doc) => doc,
             None => break,
         };
 
-        // Score: sum of absolutely essential IDFs (guaranteed match)
-        let abs_score: Score = abs_essential.iter().map(|&i| idfs[i]).sum();
+        // Save which scorer to advance before promotion may re-sort abs_essential
+        let advance_idx = abs_essential[0];
 
         // Lazily score remaining terms in IDF-descending order with early termination
         let mut score = abs_score;
@@ -338,14 +373,16 @@ fn phase2(
                     total_idf,
                     *threshold,
                 );
+                // Re-sort after promotion so new terms are in size order
+                abs_essential.sort_by_key(|&i| scorers[i].size_hint());
+                abs_score = abs_essential.iter().map(|&i| idfs[i]).sum();
             }
         }
 
-        // Advance the driver past the candidate
-        let driver = abs_essential[0];
-        scorers[driver].advance();
+        // Advance the shortest list (pre-promotion) past the candidate
+        scorers[advance_idx].advance();
         stats.num_advances += 1;
-        if scorers[driver].doc() == TERMINATED {
+        if scorers[advance_idx].doc() == TERMINATED {
             break;
         }
     }
@@ -353,45 +390,6 @@ fn phase2(
     stats.num_absolutely_essential_at_end = abs_essential.len() as u32;
 }
 
-/// Align all absolutely essential scorers to the same document via multi-way seek.
-fn align_absolutely_essential(
-    scorers: &mut [TermScorer],
-    abs_essential: &[usize],
-    stats: &mut IdfPruningStats,
-) -> Option<DocId> {
-    let mut target = scorers[abs_essential[0]].doc();
-    if target == TERMINATED {
-        return None;
-    }
-
-    loop {
-        let mut max_doc = target;
-        let mut aligned = true;
-
-        for &idx in abs_essential {
-            let doc = scorers[idx].doc();
-            if doc < target {
-                let new_doc = scorers[idx].seek(target);
-                stats.num_seeks += 1;
-                if new_doc == TERMINATED {
-                    return None;
-                }
-                if new_doc > max_doc {
-                    max_doc = new_doc;
-                    aligned = false;
-                }
-            } else if doc > max_doc {
-                max_doc = doc;
-                aligned = false;
-            }
-        }
-
-        if aligned {
-            return Some(target);
-        }
-        target = max_doc;
-    }
-}
 
 /// Rebalance: demote essential terms whose IDF fits under the non-essential prefix sum.
 fn rebalance(
