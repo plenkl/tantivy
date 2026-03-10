@@ -105,10 +105,13 @@ pub fn idf_pruning(
     let mut non_essential_idf_sum: Score = non_essential.iter().map(|&i| idfs[i]).sum();
 
     // Check if we can go straight to Phase 2
-    let (abs, rest) = partition_absolutely_essential(&essential, &idfs, total_idf, threshold);
+    let (mut abs, rest) = partition_absolutely_essential(&essential, &idfs, total_idf, threshold);
+    let (abs_from_non_essential, non_essential_rest) =
+        partition_absolutely_essential(&non_essential, &idfs, total_idf, threshold);
+    abs.extend(abs_from_non_essential);
     if !abs.is_empty() {
         let mut remaining = rest;
-        remaining.extend_from_slice(&non_essential);
+        remaining.extend(non_essential_rest);
         phase2(
             &mut scorers,
             &idfs,
