@@ -11,6 +11,7 @@ pub struct IdfPruningStats {
     pub phase1_candidates: u64,
     pub phase2_candidates: u64,
     pub num_terms: u32,
+    pub num_essential: u32,
     pub num_absolutely_essential_at_end: u32,
     pub initial_threshold: Score,
     pub final_threshold: Score,
@@ -101,6 +102,8 @@ pub fn idf_pruning(
         essential = all_indices.clone();
         non_essential.clear();
     }
+
+    stats.num_essential = essential.len() as u32;
 
     let mut non_essential_idf_sum: Score = non_essential.iter().map(|&i| idfs[i]).sum();
 
