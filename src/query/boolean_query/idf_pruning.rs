@@ -214,58 +214,56 @@ fn phase1(
             }
         }
 
-        // Lazily check non-essential terms (highest IDF first for early termination)
-        let mut remaining_non_essential = *non_essential_idf_sum;
-        if score + remaining_non_essential > *threshold {
-            for &idx in non_essential.iter().rev() {
-                if score + remaining_non_essential <= *threshold {
-                    break;
-                }
-                remaining_non_essential -= idfs[idx];
-                if scorers[idx].doc() > min_doc {
-                    continue;
-                }
-                let doc = scorers[idx].seek(min_doc);
-                stats.num_seeks += 1;
-                if doc == min_doc {
-                    score += idfs[idx];
-                }
-            }
+        // Clean up terminated scorers early (before probing non-essentials).
+        // If essential empties, the check at the top of the next iteration breaks.
+        if any_terminated {
+            essential.retain(|&i| scorers[i].doc() != TERMINATED);
         }
 
         stats.candidates_evaluated += 1;
         stats.phase1_candidates += 1;
 
-        let old_threshold = *threshold;
+        // Fast path: can't beat threshold even with all non-essential terms
+        let mut remaining_non_essential = *non_essential_idf_sum;
+        if score + remaining_non_essential <= *threshold {
+            continue;
+        }
+
+        // Lazily check non-essential terms (highest IDF first for early termination)
+        for &idx in non_essential.iter().rev() {
+            if score + remaining_non_essential <= *threshold {
+                break;
+            }
+            remaining_non_essential -= idfs[idx];
+            if scorers[idx].doc() > min_doc {
+                continue;
+            }
+            let doc = scorers[idx].seek(min_doc);
+            stats.num_seeks += 1;
+            if doc == min_doc {
+                score += idfs[idx];
+            }
+        }
+
         if score > *threshold {
             let new_threshold = callback(min_doc, score);
             stats.candidates_emitted += 1;
             if new_threshold > *threshold {
                 *threshold = new_threshold;
-            }
-        }
 
-        // Defer retain to only when needed
-        if any_terminated {
-            essential.retain(|&i| scorers[i].doc() != TERMINATED);
-            if essential.is_empty() {
-                break;
-            }
-        }
+                // Rebalance and check for absolutely essential
+                rebalance(essential, non_essential, non_essential_idf_sum, idfs, *threshold);
 
-        // On threshold increase, rebalance and check for absolutely essential
-        if *threshold > old_threshold {
-            rebalance(essential, non_essential, non_essential_idf_sum, idfs, *threshold);
-
-            let (abs, rest) =
-                partition_absolutely_essential(essential, idfs, total_idf, *threshold);
-            if !abs.is_empty() {
-                let mut remaining = rest;
-                remaining.extend_from_slice(non_essential);
-                phase2(
-                    scorers, idfs, total_idf, abs, remaining, threshold, callback, stats,
-                );
-                return;
+                let (abs, rest) =
+                    partition_absolutely_essential(essential, idfs, total_idf, *threshold);
+                if !abs.is_empty() {
+                    let mut remaining = rest;
+                    remaining.extend_from_slice(non_essential);
+                    phase2(
+                        scorers, idfs, total_idf, abs, remaining, threshold, callback, stats,
+                    );
+                    return;
+                }
             }
         }
     }
