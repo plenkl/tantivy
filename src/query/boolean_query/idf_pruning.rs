@@ -316,11 +316,7 @@ fn phase2(
     stats: &mut IdfPruningStats,
 ) {
     // Sort remaining by IDF descending for best early termination
-    remaining.sort_by(|&a, &b| {
-        idfs[b]
-            .partial_cmp(&idfs[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    remaining.sort_by_key(|&i| scorers[i].size_hint());
 
     // Sort abs_essential by posting list size (shortest first) for restart-from-shortest
     abs_essential.sort_by_key(|&i| scorers[i].size_hint());
@@ -375,6 +371,7 @@ fn phase2(
                 );
                 // Re-sort after promotion so new terms are in size order
                 abs_essential.sort_by_key(|&i| scorers[i].size_hint());
+                remaining.sort_by_key(|&i| scorers[i].size_hint());
                 abs_score = abs_essential.iter().map(|&i| idfs[i]).sum();
             }
         }
@@ -460,12 +457,6 @@ fn promote_to_absolutely_essential(
             i += 1;
         }
     }
-    // Re-sort remaining by IDF descending
-    remaining.sort_by(|&a, &b| {
-        idfs[b]
-            .partial_cmp(&idfs[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 }
 
 #[cfg(test)]
