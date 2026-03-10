@@ -12,6 +12,8 @@ pub struct IdfPruningStats {
     pub phase2_candidates: u64,
     pub num_terms: u32,
     pub num_absolutely_essential_at_end: u32,
+    pub initial_min_essential_matches: u32,
+    pub initial_num_essential: u32,
     pub initial_threshold: Score,
     pub final_threshold: Score,
 }
@@ -210,6 +212,8 @@ fn phase1(
     let mut min_essential_matches = compute_min_essential_matches(
         essential, idfs, *non_essential_idf_sum, *threshold,
     );
+    stats.initial_min_essential_matches = min_essential_matches as u32;
+    stats.initial_num_essential = essential.len() as u32;
 
     loop {
         if essential.is_empty() {
