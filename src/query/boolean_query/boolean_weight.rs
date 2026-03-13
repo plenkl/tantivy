@@ -544,7 +544,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
             .map(|(_, w)| w.max_score())
             .sum();
         if total_max_score <= threshold {
-            info!(
+            debug!(
                 "segment_skipped: elapsed={:.3}ms max_score={total_max_score:.4} threshold={threshold:.4}",
                 start.elapsed().as_secs_f64() * 1000.0,
             );
@@ -555,12 +555,12 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 super::block_wand(term_scorers, threshold, callback);
-                info!("block_wand: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
+                debug!("block_wand: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
             }
             SpecializedScorer::IdfTermUnion(term_scorers) => {
                 let stats = super::idf_pruning(term_scorers, threshold, top_k, callback);
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                info!(
+                debug!(
                     "idf_pruning: elapsed={elapsed_ms:.3}ms seeks={} advances={} evaluated={} emitted={} \
                      phase1={} phase2={} terms={} essential={} abs_essential={} \
                      threshold={:.4}→{:.4}",
@@ -579,7 +579,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
             }
             SpecializedScorer::Other(mut scorer) => {
                 for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
-                info!("for_each_pruning: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
+                debug!("for_each_pruning: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
             }
         }
         Ok(())
