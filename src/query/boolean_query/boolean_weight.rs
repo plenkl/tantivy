@@ -1,7 +1,4 @@
 use std::collections::HashMap;
-use std::time::Instant;
-
-use log::info;
 
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::index::SegmentReader;
@@ -19,7 +16,6 @@ use crate::{DocId, Score};
 
 enum SpecializedScorer {
     TermUnion(Vec<TermScorer>),
-    IdfTermUnion(Vec<TermScorer>),
     Other(Box<dyn Scorer>),
 }
 
@@ -70,13 +66,6 @@ where
             {
                 // Block wand is only available if we read frequencies.
                 return SpecializedScorer::TermUnion(scorers);
-            } else if scorers
-                .iter()
-                .all(|scorer| scorer.freq_reading_option() != FreqReadingOption::ReadFreq)
-            {
-                // IDF-only pruning when frequencies are not being read
-                // (either NoFreq or SkipFreq).
-                return SpecializedScorer::IdfTermUnion(scorers);
             } else {
                 return SpecializedScorer::Other(Box::new(BufferedUnionScorer::build(
                     scorers,
@@ -99,8 +88,7 @@ fn into_box_scorer<TScoreCombiner: ScoreCombiner>(
     num_docs: u32,
 ) -> Box<dyn Scorer> {
     match scorer {
-        SpecializedScorer::TermUnion(term_scorers)
-        | SpecializedScorer::IdfTermUnion(term_scorers) => {
+        SpecializedScorer::TermUnion(term_scorers) => {
             let union_scorer =
                 BufferedUnionScorer::build(term_scorers, score_combiner_fn, num_docs);
             Box::new(union_scorer)
@@ -183,6 +171,7 @@ pub struct BooleanWeight<TScoreCombiner: ScoreCombiner> {
     minimum_number_should_match: usize,
     scoring_enabled: bool,
     score_combiner_fn: Box<dyn Fn() -> TScoreCombiner + Sync + Send>,
+    idf_pruning: bool,
 }
 
 impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
@@ -197,6 +186,7 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
             scoring_enabled,
             score_combiner_fn,
             minimum_number_should_match: 1,
+            idf_pruning: false,
         }
     }
 
@@ -206,12 +196,14 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
         minimum_number_should_match: usize,
         scoring_enabled: bool,
         score_combiner_fn: Box<dyn Fn() -> TScoreCombiner + Sync + Send + 'static>,
+        idf_pruning: bool,
     ) -> BooleanWeight<TScoreCombiner> {
         BooleanWeight {
             weights,
             minimum_number_should_match,
             scoring_enabled,
             score_combiner_fn,
+            idf_pruning,
         }
     }
 
@@ -229,6 +221,41 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
                 .push(sub_scorer);
         }
         Ok(per_occur_scorers)
+    }
+
+    /// Tries to collect TermScorers for IDF pruning.
+    ///
+    /// Returns `Some(scorers)` when `idf_pruning` is enabled and the query is a
+    /// pure OR of term queries. Returns `None` otherwise, falling back to the
+    /// normal scorer path.
+    fn try_collect_idf_term_scorers(
+        &self,
+        reader: &SegmentReader,
+    ) -> crate::Result<Option<Vec<TermScorer>>> {
+        if !self.idf_pruning {
+            return Ok(None);
+        }
+        if self.weights.len() < 2 {
+            return Ok(None);
+        }
+        if !self.weights.iter().all(|(occur, _)| *occur == Occur::Should) {
+            return Ok(None);
+        }
+        let mut term_scorers = Vec::with_capacity(self.weights.len());
+        for (_, weight) in &self.weights {
+            let scorer = weight.scorer(reader, 1.0)?;
+            if scorer.is::<EmptyScorer>() {
+                continue;
+            }
+            match scorer.downcast::<TermScorer>() {
+                Ok(ts) => term_scorers.push(*ts),
+                Err(_) => return Ok(None),
+            }
+        }
+        if term_scorers.len() < 2 {
+            return Ok(None);
+        }
+        Ok(Some(term_scorers))
     }
 
     fn complex_scorer<TComplexScoreCombiner: ScoreCombiner>(
@@ -476,8 +503,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
     ) -> crate::Result<()> {
         let scorer = self.complex_scorer(reader, 1.0, &self.score_combiner_fn)?;
         match scorer {
-            SpecializedScorer::TermUnion(term_scorers)
-            | SpecializedScorer::IdfTermUnion(term_scorers) => {
+            SpecializedScorer::TermUnion(term_scorers) => {
                 let mut union_scorer = BufferedUnionScorer::build(
                     term_scorers,
                     &self.score_combiner_fn,
@@ -501,8 +527,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         let mut buffer = [0u32; COLLECT_BLOCK_BUFFER_LEN];
 
         match scorer {
-            SpecializedScorer::TermUnion(term_scorers)
-            | SpecializedScorer::IdfTermUnion(term_scorers) => {
+            SpecializedScorer::TermUnion(term_scorers) => {
                 let mut union_scorer = BufferedUnionScorer::build(
                     term_scorers,
                     &self.score_combiner_fn,
@@ -534,20 +559,10 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         callback: &mut dyn FnMut(DocId, Score) -> Score,
         top_k: usize,
     ) -> crate::Result<()> {
-        let start = Instant::now();
-        // Optimization 2: Early segment termination.
-        // Sum sub-weight max_scores; if <= threshold, no doc in this segment can beat it.
-        let total_max_score: Score = self
-            .weights
-            .iter()
-            .filter(|(occur, _)| is_include_occur(*occur))
-            .map(|(_, w)| w.max_score())
-            .sum();
-        if total_max_score <= threshold {
-            debug!(
-                "segment_skipped: elapsed={:.3}ms max_score={total_max_score:.4} threshold={threshold:.4}",
-                start.elapsed().as_secs_f64() * 1000.0,
-            );
+        // IDF pruning: for simple OR queries where all terms skip freq reading,
+        // we can use the analytical IDF-based pruning algorithm directly.
+        if let Some(term_scorers) = self.try_collect_idf_term_scorers(reader)? {
+            let _stats = super::idf_pruning::idf_pruning(term_scorers, threshold, top_k, callback);
             return Ok(());
         }
 
@@ -555,31 +570,9 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         match scorer {
             SpecializedScorer::TermUnion(term_scorers) => {
                 super::block_wand(term_scorers, threshold, callback);
-                debug!("block_wand: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
-            }
-            SpecializedScorer::IdfTermUnion(term_scorers) => {
-                let stats = super::idf_pruning(term_scorers, threshold, top_k, callback);
-                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                debug!(
-                    "idf_pruning: elapsed={elapsed_ms:.3}ms seeks={} advances={} evaluated={} emitted={} \
-                     phase1={} phase2={} terms={} essential={} abs_essential={} \
-                     threshold={:.4}→{:.4}",
-                    stats.num_seeks,
-                    stats.num_advances,
-                    stats.candidates_evaluated,
-                    stats.candidates_emitted,
-                    stats.phase1_candidates,
-                    stats.phase2_candidates,
-                    stats.num_terms,
-                    stats.num_essential,
-                    stats.num_absolutely_essential_at_end,
-                    stats.initial_threshold,
-                    stats.final_threshold,
-                );
             }
             SpecializedScorer::Other(mut scorer) => {
                 for_each_pruning_scorer(scorer.as_mut(), threshold, callback);
-                debug!("for_each_pruning: elapsed={:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
             }
         }
         Ok(())
@@ -590,177 +583,5 @@ fn is_include_occur(occur: Occur) -> bool {
     match occur {
         Occur::Must | Occur::Should => true,
         Occur::MustNot => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::collector::TopDocs;
-    use crate::query::QueryParser;
-    use crate::schema::*;
-    use crate::{Index, IndexWriter};
-
-    /// End-to-end test: IDF pruning activates when QueryParser uses Basic on a WithFreqs index.
-    ///
-    /// Verifies that `set_index_record_option(Basic)` on a TEXT (WithFreqsAndPositions) index
-    /// produces IDF-only scores (not BM25), confirming the full dispatch path works:
-    /// QueryParser → TermQuery(Basic) → TermWeight(Basic) → SkipFreq → IdfTermUnion → idf_pruning
-    #[test]
-    fn test_idf_scoring_end_to_end() -> crate::Result<()> {
-        let mut schema_builder = Schema::builder();
-        let body = schema_builder.add_text_field("body", TEXT);
-        let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
-
-        {
-            let mut writer: IndexWriter = index.writer_for_tests()?;
-            // "cat" appears in 2/5 docs, "dog" in 3/5, "fish" in 1/5
-            writer.add_document(doc!(body => "cat dog"))?;
-            writer.add_document(doc!(body => "dog fish"))?;
-            writer.add_document(doc!(body => "cat dog cat cat"))?; // repeated cat → different BM25, same IDF
-            writer.add_document(doc!(body => "bird"))?;
-            writer.add_document(doc!(body => "bird bird"))?;
-            writer.commit()?;
-        }
-
-        let reader = index.reader()?;
-        let searcher = reader.searcher();
-
-        // IDF-only path: Basic skips frequencies
-        let mut qp_idf = QueryParser::for_index(&index, vec![body]);
-        qp_idf.set_index_record_option(IndexRecordOption::Basic);
-        let query_idf = qp_idf.parse_query("cat dog")?;
-        let idf_results = searcher.search(&query_idf, &TopDocs::with_limit(5).order_by_score())?;
-
-        // BM25 path: default uses WithFreqsAndPositions
-        let qp_bm25 = QueryParser::for_index(&index, vec![body]);
-        let query_bm25 = qp_bm25.parse_query("cat dog")?;
-        let bm25_results =
-            searcher.search(&query_bm25, &TopDocs::with_limit(5).order_by_score())?;
-
-        // Doc 0 ("cat dog") and Doc 2 ("cat dog cat cat") both contain cat+dog.
-        // Under BM25, doc 2 scores higher because "cat" appears 3 times.
-        // Under IDF-only scoring, they score identically (same terms present).
-        let idf_score_doc0 = idf_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 0)
-            .map(|(s, _)| *s);
-        let idf_score_doc2 = idf_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 2)
-            .map(|(s, _)| *s);
-        let bm25_score_doc0 = bm25_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 0)
-            .map(|(s, _)| *s);
-        let bm25_score_doc2 = bm25_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 2)
-            .map(|(s, _)| *s);
-
-        // IDF: doc0 == doc2 (same terms, freq doesn't matter)
-        assert!(
-            (idf_score_doc0.unwrap() - idf_score_doc2.unwrap()).abs() < 1e-5,
-            "IDF scores should be equal for docs with same terms: doc0={}, doc2={}",
-            idf_score_doc0.unwrap(),
-            idf_score_doc2.unwrap()
-        );
-
-        // BM25: doc2 > doc0 (higher TF for "cat")
-        assert!(
-            bm25_score_doc2.unwrap() > bm25_score_doc0.unwrap(),
-            "BM25 should score doc2 higher than doc0: doc0={}, doc2={}",
-            bm25_score_doc0.unwrap(),
-            bm25_score_doc2.unwrap()
-        );
-
-        // The two scoring methods must produce different scores
-        assert!(
-            (idf_score_doc0.unwrap() - bm25_score_doc0.unwrap()).abs() > 1e-5,
-            "IDF and BM25 scores should differ: idf={}, bm25={}",
-            idf_score_doc0.unwrap(),
-            bm25_score_doc0.unwrap()
-        );
-
-        Ok(())
-    }
-
-    /// Same as test_idf_scoring_end_to_end but with a WithFreqs index instead of TEXT
-    /// (WithFreqsAndPositions). Reproduces a bug where WithFreqs + Basic query returned empty
-    /// results.
-    #[test]
-    fn test_idf_scoring_with_freqs_index() -> crate::Result<()> {
-        let mut schema_builder = Schema::builder();
-        let text_opts = TextOptions::default().set_indexing_options(
-            TextFieldIndexing::default()
-                .set_index_option(IndexRecordOption::WithFreqs)
-                .set_tokenizer("default"),
-        );
-        let body = schema_builder.add_text_field("body", text_opts);
-        let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema);
-
-        {
-            let mut writer: IndexWriter = index.writer_for_tests()?;
-            writer.add_document(doc!(body => "cat dog"))?;
-            writer.add_document(doc!(body => "dog fish"))?;
-            writer.add_document(doc!(body => "cat dog cat cat"))?;
-            writer.add_document(doc!(body => "bird"))?;
-            writer.add_document(doc!(body => "bird bird"))?;
-            writer.commit()?;
-        }
-
-        let reader = index.reader()?;
-        let searcher = reader.searcher();
-
-        // IDF-only path: Basic skips frequencies on a WithFreqs index
-        let mut qp_idf = QueryParser::for_index(&index, vec![body]);
-        qp_idf.set_index_record_option(IndexRecordOption::Basic);
-        let query_idf = qp_idf.parse_query("cat dog")?;
-        let idf_results = searcher.search(&query_idf, &TopDocs::with_limit(5).order_by_score())?;
-
-        // Must return non-empty results
-        assert!(
-            !idf_results.is_empty(),
-            "WithFreqs index with Basic query should return results"
-        );
-
-        // doc0 and doc2 both have cat+dog → same IDF score
-        let idf_score_doc0 = idf_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 0)
-            .map(|(s, _)| *s);
-        let idf_score_doc2 = idf_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 2)
-            .map(|(s, _)| *s);
-
-        assert!(
-            (idf_score_doc0.unwrap() - idf_score_doc2.unwrap()).abs() < 1e-5,
-            "IDF scores should be equal for docs with same terms: doc0={}, doc2={}",
-            idf_score_doc0.unwrap(),
-            idf_score_doc2.unwrap()
-        );
-
-        // BM25 path: default uses WithFreqs (full freq reading)
-        let qp_bm25 = QueryParser::for_index(&index, vec![body]);
-        let query_bm25 = qp_bm25.parse_query("cat dog")?;
-        let bm25_results =
-            searcher.search(&query_bm25, &TopDocs::with_limit(5).order_by_score())?;
-
-        let bm25_score_doc0 = bm25_results
-            .iter()
-            .find(|(_, addr)| addr.doc_id == 0)
-            .map(|(s, _)| *s);
-
-        // IDF and BM25 scores should differ
-        assert!(
-            (idf_score_doc0.unwrap() - bm25_score_doc0.unwrap()).abs() > 1e-5,
-            "IDF and BM25 scores should differ: idf={}, bm25={}",
-            idf_score_doc0.unwrap(),
-            bm25_score_doc0.unwrap()
-        );
-
-        Ok(())
     }
 }

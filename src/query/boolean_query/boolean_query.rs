@@ -131,6 +131,7 @@ use crate::schema::{IndexRecordOption, Term};
 pub struct BooleanQuery {
     subqueries: Vec<(Occur, Box<dyn Query>)>,
     minimum_number_should_match: usize,
+    idf_pruning: bool,
 }
 
 impl Clone for BooleanQuery {
@@ -143,6 +144,7 @@ impl Clone for BooleanQuery {
         Self {
             subqueries,
             minimum_number_should_match: self.minimum_number_should_match,
+            idf_pruning: self.idf_pruning,
         }
     }
 }
@@ -165,6 +167,7 @@ impl Query for BooleanQuery {
             self.minimum_number_should_match,
             enable_scoring.is_scoring_enabled(),
             Box::new(SumCombiner::default),
+            self.idf_pruning,
         )))
     }
 
@@ -202,6 +205,7 @@ impl BooleanQuery {
         BooleanQuery {
             subqueries,
             minimum_number_should_match,
+            idf_pruning: false,
         }
     }
 
@@ -213,6 +217,15 @@ impl BooleanQuery {
     /// Setter for `minimum_number_should_match`
     pub fn set_minimum_number_should_match(&mut self, minimum_number_should_match: usize) {
         self.minimum_number_should_match = minimum_number_should_match;
+    }
+
+    /// Enables IDF pruning for this boolean query.
+    ///
+    /// When enabled, pure OR queries of term queries will use an IDF-based
+    /// pruning algorithm for faster top-K retrieval. This skips term frequency
+    /// reading and uses IDF-only scoring, trading scoring precision for speed.
+    pub fn set_idf_pruning(&mut self, enabled: bool) {
+        self.idf_pruning = enabled;
     }
 
     /// Returns the intersection of the queries.

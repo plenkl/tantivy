@@ -6,7 +6,6 @@ mod idf_pruning;
 pub(crate) use self::block_wand::{block_wand, block_wand_single_scorer};
 pub use self::boolean_query::BooleanQuery;
 pub use self::boolean_weight::BooleanWeight;
-pub(crate) use self::idf_pruning::idf_pruning;
 
 #[cfg(test)]
 mod tests {

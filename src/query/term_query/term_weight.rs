@@ -115,10 +115,6 @@ impl Weight for TermWeight {
     ///
     /// More importantly, it makes it possible for scorers to implement
     /// important optimization (e.g. BlockWAND for union).
-    fn max_score(&self) -> Score {
-        self.similarity_weight.max_score()
-    }
-
     fn for_each_pruning(
         &self,
         threshold: Score,

@@ -110,12 +110,6 @@ pub trait Weight: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Returns the maximum possible score for any document.
-    /// Used for early segment termination in pruning.
-    fn max_score(&self) -> Score {
-        Score::MAX
-    }
-
     /// Calls `callback` with all of the `(doc, score)` for which score
     /// is exceeding a given threshold, with pruning optimization.
     ///
