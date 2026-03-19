@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::docset::COLLECT_BLOCK_BUFFER_LEN;
 use crate::index::SegmentReader;
@@ -173,7 +172,6 @@ pub struct BooleanWeight<TScoreCombiner: ScoreCombiner> {
     scoring_enabled: bool,
     score_combiner_fn: Box<dyn Fn() -> TScoreCombiner + Sync + Send>,
     idf_pruning: bool,
-    shared_idf_threshold: AtomicU32,
 }
 
 impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
@@ -189,7 +187,6 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
             score_combiner_fn,
             minimum_number_should_match: 1,
             idf_pruning: false,
-            shared_idf_threshold: AtomicU32::new(0),
         }
     }
 
@@ -207,7 +204,6 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
             scoring_enabled,
             score_combiner_fn,
             idf_pruning,
-            shared_idf_threshold: AtomicU32::new(0),
         }
     }
 
@@ -239,9 +235,6 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
         if !self.idf_pruning {
             return Ok(None);
         }
-        if self.weights.len() < 2 {
-            return Ok(None);
-        }
         if !self.weights.iter().all(|(occur, _)| *occur == Occur::Should) {
             return Ok(None);
         }
@@ -255,9 +248,6 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
                 Ok(ts) => term_scorers.push(*ts),
                 Err(_) => return Ok(None),
             }
-        }
-        if term_scorers.len() < 2 {
-            return Ok(None);
         }
         Ok(Some(term_scorers))
     }
@@ -566,14 +556,7 @@ impl<TScoreCombiner: ScoreCombiner + Sync> Weight for BooleanWeight<TScoreCombin
         // IDF pruning: for simple OR queries where all terms skip freq reading,
         // we can use the analytical IDF-based pruning algorithm directly.
         if let Some(term_scorers) = self.try_collect_idf_term_scorers(reader)? {
-            let shared = f32::from_bits(self.shared_idf_threshold.load(Ordering::Relaxed));
-            let effective_threshold = threshold.max(shared);
-            let stats =
-                super::idf_pruning::idf_pruning(term_scorers, effective_threshold, top_k, callback);
-            if stats.final_threshold > 0.0 {
-                self.shared_idf_threshold
-                    .fetch_max(stats.final_threshold.to_bits(), Ordering::Relaxed);
-            }
+            let _stats = super::idf_pruning::idf_pruning(term_scorers, threshold, top_k, callback);
             return Ok(());
         }
 

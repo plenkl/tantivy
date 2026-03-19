@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::Collector;
 use crate::collector::sort_key::{
-    Comparator, ComparatorEnum, NaturalComparator, ReverseComparator, SortBySimilarityScore,
-    SortByStaticFastValue, SortByString,
+    Comparator, ComparatorEnum, NaturalComparator, ReverseComparator,
+    SortBySimilarityScoreWithThreshold, SortByStaticFastValue, SortByString,
 };
 use crate::collector::sort_key_top_collector::TopBySortKeyCollector;
 use crate::collector::top_collector::ComparableDoc;
@@ -224,7 +224,11 @@ impl TopDocs {
 
     /// Order docs by decreasing BM25 similarity score.
     pub fn order_by_score(self) -> impl Collector<Fruit = Vec<(Score, DocAddress)>> {
-        TopBySortKeyCollector::new(SortBySimilarityScore, self.doc_range())
+        let doc_range = self.doc_range();
+        TopBySortKeyCollector::new(
+            SortBySimilarityScoreWithThreshold::new(doc_range.end),
+            doc_range,
+        )
     }
 
     /// Set top-K to rank documents by a given fast field.
@@ -657,6 +661,35 @@ where
         self.buffer.truncate(self.top_n);
 
         median_score
+    }
+
+    /// Ensures the threshold is set if we have at least `top_n` items.
+    ///
+    /// This is useful after merging results from a completed segment into a global
+    /// accumulator: it ensures the shared threshold is set immediately once K items
+    /// are available, rather than waiting for the buffer to reach 2K capacity.
+    pub fn ensure_threshold(&mut self) {
+        if self.buffer.len() < self.top_n {
+            return;
+        }
+        if self.buffer.len() > self.top_n {
+            // Always truncate when we have more than K items — even if threshold
+            // is already set, truncating to top K gives a tighter bound.
+            let median = self.truncate_top_n();
+            self.threshold = Some(median);
+        } else if self.threshold.is_none() {
+            // Exactly top_n items and no threshold yet: find the minimum score.
+            let min_score = self
+                .buffer
+                .iter()
+                .min_by(|a, b| compare_for_top_k(&self.comparator, a, b).reverse())
+                .unwrap()
+                .sort_key
+                .clone();
+            self.threshold = Some(min_score);
+        }
+        // If buffer.len() == top_n and threshold.is_some(), the threshold
+        // already reflects the min of those K items — nothing to improve.
     }
 
     /// Returns the top n elements in sorted order.
