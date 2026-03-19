@@ -48,6 +48,7 @@ fn scorer_union<TScoreCombiner>(
     scorers: Vec<Box<dyn Scorer>>,
     score_combiner_fn: impl Fn() -> TScoreCombiner,
     num_docs: u32,
+    idf_pruning: bool,
 ) -> SpecializedScorer
 where
     TScoreCombiner: ScoreCombiner,
@@ -70,11 +71,12 @@ where
             {
                 // Block wand is only available if we read frequencies.
                 return SpecializedScorer::TermUnion(scorers);
-            } else if scorers
-                .iter()
-                .all(|scorer| scorer.freq_reading_option() != FreqReadingOption::ReadFreq)
+            } else if idf_pruning
+                && scorers
+                    .iter()
+                    .all(|scorer| scorer.freq_reading_option() != FreqReadingOption::ReadFreq)
             {
-                // IDF-only pruning when frequencies are not being read
+                // IDF-only pruning when explicitly requested and frequencies are not being read
                 // (either NoFreq or SkipFreq).
                 return SpecializedScorer::IdfTermUnion(scorers);
             } else {
@@ -183,6 +185,7 @@ pub struct BooleanWeight<TScoreCombiner: ScoreCombiner> {
     minimum_number_should_match: usize,
     scoring_enabled: bool,
     score_combiner_fn: Box<dyn Fn() -> TScoreCombiner + Sync + Send>,
+    idf_pruning: bool,
 }
 
 impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
@@ -197,6 +200,7 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
             scoring_enabled,
             score_combiner_fn,
             minimum_number_should_match: 1,
+            idf_pruning: false,
         }
     }
 
@@ -212,7 +216,13 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
             minimum_number_should_match,
             scoring_enabled,
             score_combiner_fn,
+            idf_pruning: false,
         }
+    }
+
+    /// Sets whether IDF pruning should be used.
+    pub fn set_idf_pruning(&mut self, idf_pruning: bool) {
+        self.idf_pruning = idf_pruning;
     }
 
     fn per_occur_scorers(
@@ -281,11 +291,13 @@ impl<TScoreCombiner: ScoreCombiner> BooleanWeight<TScoreCombiner> {
                     should_scorers,
                     &score_combiner_fn,
                     num_docs,
+                    self.idf_pruning,
                 )),
                 1 => ShouldScorersCombinationMethod::Required(scorer_union(
                     should_scorers,
                     &score_combiner_fn,
                     num_docs,
+                    self.idf_pruning,
                 )),
                 n if num_of_should_scorers == n => {
                     // When num_of_should_scorers equals the number of should clauses,
@@ -600,9 +612,9 @@ mod tests {
     use crate::schema::*;
     use crate::{Index, IndexWriter};
 
-    /// End-to-end test: IDF pruning activates when QueryParser uses Basic on a WithFreqs index.
+    /// End-to-end test: IDF pruning activates when QueryParser has idf_pruning enabled.
     ///
-    /// Verifies that `set_index_record_option(Basic)` on a TEXT (WithFreqsAndPositions) index
+    /// Verifies that `set_idf_pruning(true)` on a TEXT (WithFreqsAndPositions) index
     /// produces IDF-only scores (not BM25), confirming the full dispatch path works:
     /// QueryParser → TermQuery(Basic) → TermWeight(Basic) → SkipFreq → IdfTermUnion → idf_pruning
     #[test]
@@ -626,9 +638,9 @@ mod tests {
         let reader = index.reader()?;
         let searcher = reader.searcher();
 
-        // IDF-only path: Basic skips frequencies
+        // IDF-only path: idf_pruning skips frequencies
         let mut qp_idf = QueryParser::for_index(&index, vec![body]);
-        qp_idf.set_index_record_option(IndexRecordOption::Basic);
+        qp_idf.set_idf_pruning(true);
         let query_idf = qp_idf.parse_query("cat dog")?;
         let idf_results = searcher.search(&query_idf, &TopDocs::with_limit(5).order_by_score())?;
 
@@ -713,9 +725,9 @@ mod tests {
         let reader = index.reader()?;
         let searcher = reader.searcher();
 
-        // IDF-only path: Basic skips frequencies on a WithFreqs index
+        // IDF-only path: idf_pruning skips frequencies on a WithFreqs index
         let mut qp_idf = QueryParser::for_index(&index, vec![body]);
-        qp_idf.set_index_record_option(IndexRecordOption::Basic);
+        qp_idf.set_idf_pruning(true);
         let query_idf = qp_idf.parse_query("cat dog")?;
         let idf_results = searcher.search(&query_idf, &TopDocs::with_limit(5).order_by_score())?;
 

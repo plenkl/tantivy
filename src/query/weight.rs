@@ -117,10 +117,15 @@ pub trait Weight: Send + Sync + 'static {
     }
 
     /// Calls `callback` with all of the `(doc, score)` for which score
-    /// is exceeding a given threshold, with pruning optimization.
+    /// is exceeding a given threshold.
     ///
-    /// `top_k` is the number of top documents being collected, used by
-    /// IDF pruning to bootstrap an analytical threshold.
+    /// This method is useful for the [`TopDocs`](crate::collector::TopDocs) collector.
+    /// For all docsets, the blanket implementation has the benefit
+    /// of prefiltering (doc, score) pairs, avoiding the
+    /// virtual dispatch cost.
+    ///
+    /// More importantly, it makes it possible for scorers to implement
+    /// important optimization (e.g. BlockWAND for union).
     fn for_each_pruning(
         &self,
         threshold: Score,

@@ -131,6 +131,7 @@ use crate::schema::{IndexRecordOption, Term};
 pub struct BooleanQuery {
     subqueries: Vec<(Occur, Box<dyn Query>)>,
     minimum_number_should_match: usize,
+    idf_pruning: bool,
 }
 
 impl Clone for BooleanQuery {
@@ -143,6 +144,7 @@ impl Clone for BooleanQuery {
         Self {
             subqueries,
             minimum_number_should_match: self.minimum_number_should_match,
+            idf_pruning: self.idf_pruning,
         }
     }
 }
@@ -160,12 +162,14 @@ impl Query for BooleanQuery {
             .iter()
             .map(|(occur, subquery)| Ok((*occur, subquery.weight(enable_scoring)?)))
             .collect::<crate::Result<_>>()?;
-        Ok(Box::new(BooleanWeight::with_minimum_number_should_match(
+        let mut weight = BooleanWeight::with_minimum_number_should_match(
             sub_weights,
             self.minimum_number_should_match,
             enable_scoring.is_scoring_enabled(),
             Box::new(SumCombiner::default),
-        )))
+        );
+        weight.set_idf_pruning(self.idf_pruning);
+        Ok(Box::new(weight))
     }
 
     fn query_terms<'a>(&'a self, visitor: &mut dyn FnMut(&'a Term, bool)) {
@@ -202,7 +206,13 @@ impl BooleanQuery {
         BooleanQuery {
             subqueries,
             minimum_number_should_match,
+            idf_pruning: false,
         }
+    }
+
+    /// Sets whether IDF pruning should be used for this query.
+    pub fn set_idf_pruning(&mut self, idf_pruning: bool) {
+        self.idf_pruning = idf_pruning;
     }
 
     /// Getter for `minimum_number_should_match`

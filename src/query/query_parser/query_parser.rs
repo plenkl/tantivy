@@ -209,7 +209,7 @@ pub struct QueryParser {
     boost: FxHashMap<Field, Score>,
     fuzzy: FxHashMap<Field, Fuzzy>,
     regexes_allowed: bool,
-    index_record_option: IndexRecordOption,
+    idf_pruning: bool,
 }
 
 #[derive(Clone)]
@@ -265,7 +265,7 @@ impl QueryParser {
             boost: Default::default(),
             fuzzy: Default::default(),
             regexes_allowed: false,
-            index_record_option: IndexRecordOption::WithFreqs,
+            idf_pruning: false,
         }
     }
 
@@ -291,17 +291,14 @@ impl QueryParser {
         self.conjunction_by_default = true;
     }
 
-    /// Sets the `IndexRecordOption` used when creating `TermQuery` instances.
+    /// Enables IDF pruning for this query parser.
     ///
-    /// By default, the query parser creates `TermQuery` with `IndexRecordOption::WithFreqs`,
-    /// which reads term frequencies for BM25 scoring. Setting this to `IndexRecordOption::Basic`
-    /// tells the query parser to skip reading frequencies, enabling IDF-only scoring and the
-    /// associated pruning optimization for faster long-query performance.
-    ///
-    /// This is useful when the index was built with `WithFreqs` but you want to trade scoring
-    /// precision for query speed.
-    pub fn set_index_record_option(&mut self, option: IndexRecordOption) {
-        self.index_record_option = option;
+    /// When enabled, the query parser creates `TermQuery` with `IndexRecordOption::Basic`
+    /// (skipping term frequencies) and sets `idf_pruning` on `BooleanQuery` instances,
+    /// enabling IDF-only scoring and the associated pruning optimization for faster
+    /// long-query performance.
+    pub fn set_idf_pruning(&mut self, idf_pruning: bool) {
+        self.idf_pruning = idf_pruning;
     }
 
     /// Sets a boost for a specific field.
@@ -350,7 +347,7 @@ impl QueryParser {
     /// is not a valid query.
     pub fn parse_query(&self, query: &str) -> Result<Box<dyn Query>, QueryParserError> {
         let logical_ast = self.parse_query_to_logical_ast(query)?;
-        Ok(convert_to_query(&self.fuzzy, self.index_record_option, logical_ast))
+        Ok(convert_to_query(&self.fuzzy, self.idf_pruning, logical_ast))
     }
 
     /// Parse a query leniently
@@ -363,7 +360,7 @@ impl QueryParser {
     /// In case it encountered such issues, they are reported as a Vec of errors.
     pub fn parse_query_lenient(&self, query: &str) -> (Box<dyn Query>, Vec<QueryParserError>) {
         let (logical_ast, errors) = self.parse_query_to_logical_ast_lenient(query);
-        (convert_to_query(&self.fuzzy, self.index_record_option, logical_ast), errors)
+        (convert_to_query(&self.fuzzy, self.idf_pruning, logical_ast), errors)
     }
 
     /// Build a query from an already parsed user input AST
@@ -379,7 +376,7 @@ impl QueryParser {
         if !err.is_empty() {
             return Err(err.swap_remove(0));
         }
-        Ok(convert_to_query(&self.fuzzy, self.index_record_option, logical_ast))
+        Ok(convert_to_query(&self.fuzzy, self.idf_pruning, logical_ast))
     }
 
     /// Build leniently a query from an already parsed user input AST.
@@ -390,7 +387,7 @@ impl QueryParser {
         user_input_ast: UserInputAst,
     ) -> (Box<dyn Query>, Vec<QueryParserError>) {
         let (logical_ast, errors) = self.compute_logical_ast_lenient(user_input_ast);
-        (convert_to_query(&self.fuzzy, self.index_record_option, logical_ast), errors)
+        (convert_to_query(&self.fuzzy, self.idf_pruning, logical_ast), errors)
     }
 
     /// Parse the user query into an AST.
@@ -928,9 +925,14 @@ impl QueryParser {
 
 fn convert_literal_to_query(
     fuzzy: &FxHashMap<Field, Fuzzy>,
-    index_record_option: IndexRecordOption,
+    idf_pruning: bool,
     logical_literal: LogicalLiteral,
 ) -> Box<dyn Query> {
+    let index_record_option = if idf_pruning {
+        IndexRecordOption::Basic
+    } else {
+        IndexRecordOption::WithFreqs
+    };
     match logical_literal {
         LogicalLiteral::Term(term) => {
             if let Some(fuzzy) = fuzzy.get(&term.field()) {
@@ -1072,7 +1074,7 @@ fn generate_literals_for_json_object(
 
 fn convert_to_query(
     fuzzy: &FxHashMap<Field, Fuzzy>,
-    index_record_option: IndexRecordOption,
+    idf_pruning: bool,
     logical_ast: LogicalAst,
 ) -> Box<dyn Query> {
     match trim_ast(logical_ast) {
@@ -1080,20 +1082,24 @@ fn convert_to_query(
             let occur_subqueries = trimmed_clause
                 .into_iter()
                 .map(|(occur, subquery)| {
-                    (occur, convert_to_query(fuzzy, index_record_option, subquery))
+                    (occur, convert_to_query(fuzzy, idf_pruning, subquery))
                 })
                 .collect::<Vec<_>>();
             assert!(
                 !occur_subqueries.is_empty(),
                 "Should not be empty after trimming"
             );
-            Box::new(BooleanQuery::new(occur_subqueries))
+            let mut bq = BooleanQuery::new(occur_subqueries);
+            if idf_pruning {
+                bq.set_idf_pruning(true);
+            }
+            Box::new(bq)
         }
         Some(LogicalAst::Leaf(trimmed_logical_literal)) => {
-            convert_literal_to_query(fuzzy, index_record_option, *trimmed_logical_literal)
+            convert_literal_to_query(fuzzy, idf_pruning, *trimmed_logical_literal)
         }
         Some(LogicalAst::Boost(ast, boost)) => {
-            let query = convert_to_query(fuzzy, index_record_option, *ast);
+            let query = convert_to_query(fuzzy, idf_pruning, *ast);
             let boosted_query = BoostQuery::new(query, boost);
             Box::new(boosted_query)
         }
@@ -1960,7 +1966,7 @@ mod test {
              (Should, PhrasePrefixQuery { field: Field(1), phrase_terms: [(0, Term(field=1, \
              type=Str, \"big\")), (1, Term(field=1, type=Str, \"bad\"))], prefix: (2, \
              Term(field=1, type=Str, \"wo\")), max_expansions: 50 })], \
-             minimum_number_should_match: 1 }"
+             minimum_number_should_match: 1, idf_pruning: false }"
         );
     }
 
@@ -2026,7 +2032,7 @@ mod test {
                 "BooleanQuery { subqueries: [(Should, FuzzyTermQuery { term: Term(field=0, \
                  type=Str, \"abc\"), distance: 1, transposition_cost_one: true, prefix: false }), \
                  (Should, TermQuery(Term(field=1, type=Str, \"abc\")))], \
-                 minimum_number_should_match: 1 }"
+                 minimum_number_should_match: 1, idf_pruning: false }"
             );
         }
 
@@ -2044,7 +2050,7 @@ mod test {
                 "BooleanQuery { subqueries: [(Should, TermQuery(Term(field=0, type=Str, \
                  \"abc\"))), (Should, FuzzyTermQuery { term: Term(field=1, type=Str, \"abc\"), \
                  distance: 2, transposition_cost_one: false, prefix: true })], \
-                 minimum_number_should_match: 1 }"
+                 minimum_number_should_match: 1, idf_pruning: false }"
             );
         }
     }

@@ -113,7 +113,8 @@ fn has_valid_dictionary_footer(data: &[u8]) -> bool {
     version == 3 && (index_offset as usize) <= data.len() - 20
 }
 
-fn detect_dictionary_len(body: &[u8], stored_len: usize) -> io::Result<usize> {
+fn detect_dictionary_len(body: &[u8], stored_len: u32) -> io::Result<usize> {
+    let stored_len = stored_len as usize;
     if stored_len <= body.len() && has_valid_dictionary_footer(&body[..stored_len]) {
         return Ok(stored_len);
     }
@@ -129,10 +130,8 @@ fn detect_dictionary_len(body: &[u8], stored_len: usize) -> io::Result<usize> {
 
 pub fn open_column_bytes(data: OwnedBytes, format_version: Version) -> io::Result<BytesColumn> {
     let (body, dictionary_len_bytes) = data.rsplit(4);
-    let stored_len = u32::from_le_bytes(
-        dictionary_len_bytes.as_slice().try_into().unwrap(),
-    ) as usize;
-    let dictionary_len = detect_dictionary_len(body.as_slice(), stored_len)?;
+    let dictionary_len = u32::from_le_bytes(dictionary_len_bytes.as_slice().try_into().unwrap());
+    let dictionary_len = detect_dictionary_len(body.as_slice(), dictionary_len)?;
     let (dictionary_bytes, column_bytes) = body.split(dictionary_len);
     let dictionary = Arc::new(Dictionary::from_bytes(dictionary_bytes)?);
     let term_ord_column = crate::column::open_column_u64::<u64>(column_bytes, format_version)?;
