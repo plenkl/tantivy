@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
 use crate::collector::sort_key::NaturalComparator;
 use crate::collector::{SegmentSortKeyComputer, SortKeyComputer, TopNComputer};
 use crate::{DocAddress, DocId, Score};
@@ -51,6 +54,98 @@ impl SortKeyComputer for SortBySimilarityScore {
                 top_n.push(score, doc);
                 top_n.threshold.unwrap_or(Score::MIN)
             })?;
+        }
+
+        Ok(top_n
+            .into_vec()
+            .into_iter()
+            .map(|cid| (cid.sort_key, DocAddress::new(segment_ord, cid.doc)))
+            .collect())
+    }
+}
+
+/// Wraps `SortBySimilarityScore` with cross-segment threshold sharing.
+///
+/// Uses `Arc<AtomicU32>` to share the best threshold across segments.
+/// For positive f32 values, IEEE 754 bit patterns preserve ordering, so
+/// `AtomicU32::fetch_max` correctly implements max for positive floats.
+pub(crate) struct SortBySimilarityScoreWithThreshold {
+    shared_threshold: Arc<AtomicU32>,
+}
+
+impl SortBySimilarityScoreWithThreshold {
+    pub fn new() -> Self {
+        // 0u32 = 0.0f32.to_bits() = "no threshold yet"
+        Self {
+            shared_threshold: Arc::new(AtomicU32::new(0u32)),
+        }
+    }
+}
+
+impl SortKeyComputer for SortBySimilarityScoreWithThreshold {
+    type SortKey = Score;
+    type Child = SortBySimilarityScore;
+    type Comparator = NaturalComparator;
+
+    fn requires_scoring(&self) -> bool {
+        true
+    }
+
+    fn segment_sort_key_computer(
+        &self,
+        _segment_reader: &crate::SegmentReader,
+    ) -> crate::Result<Self::Child> {
+        Ok(SortBySimilarityScore)
+    }
+
+    fn collect_segment_top_k(
+        &self,
+        k: usize,
+        weight: &dyn crate::query::Weight,
+        reader: &crate::SegmentReader,
+        segment_ord: u32,
+    ) -> crate::Result<Vec<(Self::SortKey, DocAddress)>> {
+        let threshold_bits = self.shared_threshold.load(Ordering::Relaxed);
+        let initial_threshold = f32::from_bits(threshold_bits);
+        // Treat 0.0 as "no threshold" → use Score::MIN
+        let initial_threshold = if initial_threshold > 0.0 {
+            initial_threshold
+        } else {
+            Score::MIN
+        };
+
+        let mut top_n: TopNComputer<Score, DocId, Self::Comparator> =
+            TopNComputer::new_with_comparator(k, self.comparator());
+
+        // Seed the TopNComputer's threshold so it rejects docs below initial_threshold
+        if initial_threshold > Score::MIN {
+            top_n.threshold = Some(initial_threshold);
+        }
+
+        if let Some(alive_bitset) = reader.alive_bitset() {
+            let mut threshold = initial_threshold;
+            weight.for_each_pruning(initial_threshold, reader, &mut |doc, score| {
+                if alive_bitset.is_deleted(doc) {
+                    return threshold;
+                }
+                top_n.push(score, doc);
+                threshold = top_n.threshold.unwrap_or(initial_threshold);
+                threshold
+            })?;
+        } else {
+            weight.for_each_pruning(initial_threshold, reader, &mut |doc, score| {
+                top_n.push(score, doc);
+                top_n.threshold.unwrap_or(initial_threshold)
+            })?;
+        }
+
+        // Update shared threshold for subsequent segments
+        if let Some(final_threshold) = top_n.threshold {
+            if final_threshold > 0.0 {
+                // fetch_max is correct for positive f32 bit patterns (IEEE 754 ordering)
+                self.shared_threshold
+                    .fetch_max(final_threshold.to_bits(), Ordering::Relaxed);
+            }
         }
 
         Ok(top_n
