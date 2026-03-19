@@ -924,6 +924,7 @@ impl QueryParser {
 
 fn convert_literal_to_query(
     fuzzy: &FxHashMap<Field, Fuzzy>,
+    idf_pruning: bool,
     logical_literal: LogicalLiteral,
 ) -> Box<dyn Query> {
     match logical_literal {
@@ -943,7 +944,12 @@ fn convert_literal_to_query(
                     ))
                 }
             } else {
-                Box::new(TermQuery::new(term, IndexRecordOption::WithFreqs))
+                let record_option = if idf_pruning {
+                    IndexRecordOption::Basic
+                } else {
+                    IndexRecordOption::WithFreqs
+                };
+                Box::new(TermQuery::new(term, record_option))
             }
         }
         LogicalLiteral::Phrase {
@@ -1085,7 +1091,7 @@ fn convert_to_query(
             Box::new(query)
         }
         Some(LogicalAst::Leaf(trimmed_logical_literal)) => {
-            convert_literal_to_query(fuzzy, *trimmed_logical_literal)
+            convert_literal_to_query(fuzzy, idf_pruning, *trimmed_logical_literal)
         }
         Some(LogicalAst::Boost(ast, boost)) => {
             let query = convert_to_query(fuzzy, idf_pruning, *ast);
